@@ -18,20 +18,22 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # pandas_ta を削除し、標準ライブラリのみに絞る
-        pip install yfinance pandas PyYAML matplotlib pytest
+        # カバレッジ測定用のライブラリを追加
+        pip install yfinance pandas PyYAML matplotlib pytest pytest-cov
             
-    - name: Run Unit Tests
+    - name: Run Unit Tests with Coverage
       run: |
-        # testsディレクトリがある場合のみ実行し、なければスキップする設定
         if [ -d "tests" ]; then
-          pytest tests/
+          # ターミナルにカバレッジ結果を出力
+          pytest --cov=./ --cov-report=term-missing tests/
         else
-          echo "No tests directory found, skipping unit tests."
+          echo "No tests directory found."
+          exit 1
         fi
 
     - name: Run System Test (Execution Check)
+      env:
+        # GUIなし環境(Linux Server)でMatplotlibを動作させるための設定
+        MPLBACKEND: Agg
       run: |
-        # 実際にスクリプトを動かして、異常終了しないか確認
-        # (config.yamlが存在することを前提としています)
         python main.py

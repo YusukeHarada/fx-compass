@@ -1,6 +1,9 @@
 import pandas as pd
 import yfinance as yf
 import yaml
+import matplotlib
+# GitHub Actions等のGUIがない環境でも動作するようにバックエンドをAggに設定
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import os
@@ -105,7 +108,7 @@ class FXAnalyzerPro:
                              2: {'BUY': '#2ecc71', 'SELL': '#e74c3c', 's': 200},
                              3: {'BUY': '#f1c40f', 'SELL': '#9b59b6', 's': 450}}
                 m_type = '^' if sig_type == "BUY" else 'v'
-                ax1.scatter(plot_df.index[i], plot_df.iloc[i]['Close'], 
+                ax1.scatter(plot_df.index[i], plot_df.iloc[price_idx := i]['Close'], 
                             color=color_map[lv][sig_type], marker=m_type, s=color_map[lv]['s'], 
                             edgecolor='black', linewidth=0.5, zorder=5)
 
