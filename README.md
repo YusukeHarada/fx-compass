@@ -72,7 +72,67 @@ python main.py
 2. **Logic Engine 層**: 統計指標の算出および判定アルゴリズムの適用。
 3. **Presentation 層**: Matplotlib を用いた視覚化およびレポート出力。
 
-#### 2.2 判定アルゴリズムの階層構造
+#### 2.2 ソフトウェアモジュール構成図
+
+```mermaid
+graph TD
+    subgraph Entrypoint["エントリーポイント"]
+        MAIN["main.py\n__main__"]
+    end
+
+    subgraph Config["設定管理"]
+        YAML["config.yaml\n通貨ペア / 時間足 / 指標パラメータ"]
+    end
+
+    subgraph Class["FXAnalyzerPro クラス"]
+        INIT["__init__()\nconfig 読み込み\ncharts/ ディレクトリ作成"]
+        FETCH["fetch_data(symbol)\nyfinance からOHLC取得\n短期足は period を自動調整"]
+        ANALYZE["analyze(df)\nEMA / MACD / RSI 計算\nanalyze_row() で判定"]
+        ANALYZE_ROW["analyze_row(prev, curr)\n3層フィルタによるシグナル判定\nHOLD / BUY / SELL × Lv.1〜3"]
+        CHART["generate_chart(df, ...)\nMatplotlib で PNG 出力\ncharts/{symbol}_{time}.png"]
+    end
+
+    subgraph External["外部ライブラリ / リソース"]
+        YF["yfinance\n為替・株価データAPI"]
+        PANDAS["pandas\n時系列データ処理"]
+        MPL["matplotlib\nチャート描画（Aggバックエンド）"]
+    end
+
+    subgraph Output["出力物"]
+        PNG["charts/*.png\nシグナルプロット済みチャート"]
+        STDOUT["stdout\n判定結果サマリ"]
+    end
+
+    subgraph Tests["テスト"]
+        CONF["tests/conftest.py\nsys.path 設定"]
+        TEST["tests/test_logic.py\nホワイトボックス / ブラックボックス\n堅牢性 / 副作用テスト"]
+    end
+
+    MAIN -->|"config_path"| INIT
+    YAML -->|"yaml.safe_load"| INIT
+    INIT --> FETCH
+    INIT --> ANALYZE
+    INIT --> CHART
+    FETCH -->|"DataFrame"| ANALYZE
+    FETCH -->|"yf.download()"| YF
+    YF -->|"OHLC DataFrame"| FETCH
+    ANALYZE -->|"指標列付き DataFrame"| ANALYZE_ROW
+    ANALYZE_ROW -->|"sig_type, level"| ANALYZE
+    ANALYZE -->|"df_final"| CHART
+    ANALYZE -->|"signal, level, price, sl"| STDOUT
+    PANDAS --> ANALYZE
+    CHART --> MPL
+    MPL --> PNG
+    MAIN --> STDOUT
+
+    CONF --> TEST
+    TEST -->|"import"| INIT
+    TEST -->|"直接呼び出し"| ANALYZE_ROW
+    TEST -->|"直接呼び出し"| ANALYZE
+    TEST -->|"tmp_path で隔離"| CHART
+```
+
+#### 2.3 判定アルゴリズムの階層構造
 
 判定ロジックは以下の条件分岐構造に基づき、偽陽性（False Positive）を抑制するように設計されています。
 
