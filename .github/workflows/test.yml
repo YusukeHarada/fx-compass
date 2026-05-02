@@ -18,9 +18,9 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # Actionsのデフォルト認証干渉を無効化してインストール
-        git config --global --unset-all http.https://github.com/.extraheader
-        pip install "pandas_ta @ git+https://github.com/twopirllc/pandas-ta.git@development"
+        # GitHub経由を避け、PyPIにあるベータ版（pandas 2.0以降に対応したもの）を直接指定
+        pip install pandas-ta==0.3.14b0
+        # その他の依存関係
         pip install yfinance pandas PyYAML matplotlib pytest
             
     - name: Run Unit Tests
