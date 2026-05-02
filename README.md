@@ -76,60 +76,67 @@ python main.py
 
 ```mermaid
 graph TD
-    subgraph Entrypoint["エントリーポイント"]
-        MAIN["main.py\n__main__"]
+    MAIN["main.py / __main__\nconfig.yaml を読み込み\n複数シンボルをバッチ処理"]
+    YAML["config.yaml\n通貨ペア・時間足・指標パラメータ"]
+    YAML -->|"yaml.safe_load"| MAIN
+
+    subgraph L1["Data Acquisition 層"]
+        FETCH["fetch_data(symbol)\nOHLC 時系列データ取得\n短期足は period を自動調整"]
+        YF["yfinance"]
+        YF -->|"OHLC DataFrame"| FETCH
     end
 
-    subgraph Config["設定管理"]
-        YAML["config.yaml\n通貨ペア / 時間足 / 指標パラメータ"]
-    end
-
-    subgraph Class["FXAnalyzerPro クラス"]
-        INIT["__init__()\nconfig 読み込み\ncharts/ ディレクトリ作成"]
-        FETCH["fetch_data(symbol)\nyfinance からOHLC取得\n短期足は period を自動調整"]
-        ANALYZE["analyze(df)\nEMA / MACD / RSI 計算\nanalyze_row() で判定"]
+    subgraph L2["Logic Engine 層"]
+        ANALYZE["analyze(df)\nEMA / MACD / RSI 計算"]
         ANALYZE_ROW["analyze_row(prev, curr)\n3層フィルタによるシグナル判定\nHOLD / BUY / SELL × Lv.1〜3"]
-        CHART["generate_chart(df, ...)\nMatplotlib で PNG 出力\ncharts/{symbol}_{time}.png"]
+        PANDAS["pandas\n時系列演算（ewm / rolling / diff）"]
+        PANDAS --> ANALYZE
+        ANALYZE -->|"指標列付き DataFrame"| ANALYZE_ROW
+        ANALYZE_ROW -->|"sig_type, level"| ANALYZE
     end
 
-    subgraph External["外部ライブラリ / リソース"]
-        YF["yfinance\n為替・株価データAPI"]
-        PANDAS["pandas\n時系列データ処理"]
-        MPL["matplotlib\nチャート描画（Aggバックエンド）"]
-    end
-
-    subgraph Output["出力物"]
+    subgraph L3["Presentation 層"]
+        CHART["generate_chart(df, ...)\nシグナルをチャートにプロット"]
+        MPL["matplotlib\nAgg バックエンド"]
         PNG["charts/*.png\nシグナルプロット済みチャート"]
         STDOUT["stdout\n判定結果サマリ"]
+        CHART --> MPL --> PNG
     end
 
     subgraph Tests["テスト"]
         CONF["tests/conftest.py\nsys.path 設定"]
         TEST["tests/test_logic.py\nホワイトボックス / ブラックボックス\n堅牢性 / 副作用テスト"]
+        CONF --> TEST
     end
 
-    MAIN -->|"config_path"| INIT
-    YAML -->|"yaml.safe_load"| INIT
-    INIT --> FETCH
-    INIT --> ANALYZE
-    INIT --> CHART
+    MAIN -->|"symbol"| FETCH
     FETCH -->|"DataFrame"| ANALYZE
-    FETCH -->|"yf.download()"| YF
-    YF -->|"OHLC DataFrame"| FETCH
-    ANALYZE -->|"指標列付き DataFrame"| ANALYZE_ROW
-    ANALYZE_ROW -->|"sig_type, level"| ANALYZE
-    ANALYZE -->|"df_final"| CHART
-    ANALYZE -->|"signal, level, price, sl"| STDOUT
-    PANDAS --> ANALYZE
-    CHART --> MPL
-    MPL --> PNG
-    MAIN --> STDOUT
-
-    CONF --> TEST
-    TEST -->|"import"| INIT
-    TEST -->|"直接呼び出し"| ANALYZE_ROW
+    ANALYZE -->|"df_final, signal, price, sl"| CHART
+    ANALYZE -->|"signal, price, sl"| STDOUT
     TEST -->|"直接呼び出し"| ANALYZE
+    TEST -->|"直接呼び出し"| ANALYZE_ROW
     TEST -->|"tmp_path で隔離"| CHART
+```
+
+```
+config.yaml → main.py
+                │
+         ┌──────▼──────────────────────────┐
+         │  Data Acquisition 層            │
+         │  yfinance → fetch_data()        │
+         └──────────────────┬──────────────┘
+                            │ DataFrame
+         ┌──────────────────▼──────────────┐
+         │  Logic Engine 層                │
+         │  analyze() → analyze_row()      │
+         │  pandas で EMA/MACD/RSI 計算    │
+         └──────────────────┬──────────────┘
+                            │ signal, df_final
+         ┌──────────────────▼──────────────┐
+         │  Presentation 層                │
+         │  generate_chart() → matplotlib  │
+         │  charts/*.png / stdout          │
+         └─────────────────────────────────┘
 ```
 
 #### 2.3 判定アルゴリズムの階層構造
