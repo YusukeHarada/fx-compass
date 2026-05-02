@@ -1,5 +1,4 @@
 import pandas as pd
-import pandas_ta as ta
 import yfinance as yf
 import yaml
 import matplotlib.pyplot as plt
@@ -49,14 +48,23 @@ class FXAnalyzerPro:
 
     def analyze(self, df):
         l_cfg = self.config['logic']
-        macd = df.ta.macd(fast=l_cfg['macd']['fast'], slow=l_cfg['macd']['slow'], signal=l_cfg['macd']['signal'])
-        rsi = df.ta.rsi(length=l_cfg['rsi']['length'])
-        df = pd.concat([df, macd, rsi], axis=1)
+        
+        # 指標計算 (pandasの標準機能のみを使用)
+        ema_fast = df['Close'].ewm(span=l_cfg['macd']['fast'], adjust=False).mean()
+        ema_slow = df['Close'].ewm(span=l_cfg['macd']['slow'], adjust=False).mean()
+        df['MACD'] = ema_fast - ema_slow
+        df['MACDs'] = df['MACD'].ewm(span=l_cfg['macd']['signal'], adjust=False).mean()
+        
+        diff = df['Close'].diff()
+        gain = diff.clip(lower=0)
+        loss = -diff.clip(upper=0)
+        avg_gain = gain.rolling(window=l_cfg['rsi']['length']).mean()
+        avg_loss = loss.rolling(window=l_cfg['rsi']['length']).mean()
+        rs = avg_gain / avg_loss
+        df['RSI'] = 100 - (100 / (1 + rs))
 
-        m_col = f"MACD_{l_cfg['macd']['fast']}_{l_cfg['macd']['slow']}_{l_cfg['macd']['signal']}"
-        s_col = f"MACDs_{l_cfg['macd']['fast']}_{l_cfg['macd']['slow']}_{l_cfg['macd']['signal']}"
-        r_col = f"RSI_{l_cfg['rsi']['length']}"
-
+        m_col, s_col, r_col = 'MACD', 'MACDs', 'RSI'
+        
         if len(df) < 2: return "DATA_SHORTAGE", 0, None, None, None, df
 
         sig_type, level = self.analyze_row(df.iloc[-2], df.iloc[-1], l_cfg, m_col, s_col, r_col)
@@ -74,9 +82,11 @@ class FXAnalyzerPro:
 
     def generate_chart(self, df, symbol, signal, current_level, time, price, config):
         l_cfg = config['logic']
-        m_col = f"MACD_{l_cfg['macd']['fast']}_{l_cfg['macd']['slow']}_{l_cfg['macd']['signal']}"
-        s_col = f"MACDs_{l_cfg['macd']['fast']}_{l_cfg['macd']['slow']}_{l_cfg['macd']['signal']}"
-        r_col = f"RSI_{l_cfg['rsi']['length']}"
+        
+        # 自前計算に合わせたシンプルなカラム名
+        m_col = 'MACD'
+        s_col = 'MACDs'
+        r_col = 'RSI'
         
         plot_df = df.tail(100).copy()
         dates = plot_df.index
@@ -87,6 +97,7 @@ class FXAnalyzerPro:
         ax1.plot(dates, plot_df['Close'], color='#2c3e50', linewidth=1.5, label='Price', alpha=0.8)
         ax1.set_title(f"FX-Compass Pro: {symbol} ({config['trading']['interval']})", fontsize=16, fontweight='bold')
 
+        # 過去100本分のシグナルを再計算してプロット
         for i in range(1, len(plot_df)):
             sig_type, lv = self.analyze_row(plot_df.iloc[i-1], plot_df.iloc[i], l_cfg, m_col, s_col, r_col)
             if lv > 0:
@@ -98,16 +109,25 @@ class FXAnalyzerPro:
                             color=color_map[lv][sig_type], marker=m_type, s=color_map[lv]['s'], 
                             edgecolor='black', linewidth=0.5, zorder=5)
 
-        ax1.legend(loc='upper left'); ax1.grid(alpha=0.3)
+        ax1.legend(loc='upper left')
+        ax1.grid(alpha=0.3)
+        
+        # MACD描画
         ax2.plot(dates, plot_df[m_col], color='#3498db', label='MACD')
         ax2.plot(dates, plot_df[s_col], color='#e67e22', label='Signal')
-        ax2.axhline(0, color='black', linewidth=1); ax2.legend(loc='upper left'); ax2.grid(alpha=0.3)
+        ax2.axhline(0, color='black', linewidth=1)
+        ax2.legend(loc='upper left')
+        ax2.grid(alpha=0.3)
+        
+        # RSI描画
         ax3.plot(dates, plot_df[r_col], color='#9b59b6', label='RSI')
         ax3.axhline(l_cfg['rsi']['sell_threshold'], color='#e74c3c', linestyle='--')
         ax3.axhline(l_cfg['rsi']['buy_threshold'], color='#2ecc71', linestyle='--')
-        ax3.set_ylim(0, 100); ax3.legend(loc='upper left'); ax3.grid(alpha=0.3)
+        ax3.set_ylim(0, 100)
+        ax3.legend(loc='upper left')
+        ax3.grid(alpha=0.3)
 
-        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
         fig.autofmt_xdate()
 
         file_name = f"chart_{symbol.replace('=X', '')}_{time.strftime('%H%M')}.png"
@@ -118,7 +138,6 @@ class FXAnalyzerPro:
 
 if __name__ == "__main__":
     analyzer = FXAnalyzerPro()
-    # configからsymbolsリストを取得
     target_symbols = analyzer.config['trading'].get('symbols', ["USDJPY=X"])
     
     print(f"\n--- FX-Compass Pro Multi-Scanner ---")

@@ -18,9 +18,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # GitHub経由を避け、PyPIにあるベータ版（pandas 2.0以降に対応したもの）を直接指定
-        pip install pandas-ta==0.3.14b0
-        # その他の依存関係
+        # pandas_ta を削除し、標準ライブラリのみに絞る
         pip install yfinance pandas PyYAML matplotlib pytest
             
     - name: Run Unit Tests
