@@ -1,0 +1,23 @@
+trading:
+  symbols:             # リスト形式に変更
+    - "USDJPY=X"
+    - "AUDJPY=X"
+    - "MXNJPY=X"
+    - "TRYJPY=X"
+    - "EURJPY=X"
+    - "GBPUSD=X"
+  interval: "1h"       # 1m, 5m, 15m, 1h, 1d
+  period: "3mo"        # 1m/5mの場合は実行時に自動で1dに調整されます
+
+logic:
+  mode: "strict"
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  rsi:
+    length: 14
+    buy_threshold: 30
+    sell_threshold: 70
+  risk:
+    stop_loss_pct: 0.01
