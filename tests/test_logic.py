@@ -1,11 +1,11 @@
 """
-FX-Compass Pro テストスイート
+FX-Compass Pro テストスイート (拡張版)
 
 テスト観点:
-  - ホワイトボックス: EMA・RSI の算術的妥当性
-  - ブラックボックス: analyze_row の全シグナル状態遷移と境界値
-  - 堅牢性: データ不足・NaN・ゼロ除算への耐故障性
-  - 副作用: generate_chart のファイル出力（tmp_path で隔離）
+  - ホワイトボックス: EMA・RSI の算術的妥当性、MultiIndex カラム解消
+  - ブラックボックス: analyze_row の全シグナル状態遷移と境界値、損切り計算
+  - 堅牢性: データ不足・NaN・ゼロ除算・yfinanceエラーへの耐故障性
+  - 副作用: generate_chart のファイル出力、run_full_scan の統合フロー
 """
 
 import os
@@ -13,6 +13,7 @@ import math
 import pytest
 import pandas as pd
 import numpy as np
+import datetime
 from unittest.mock import patch, MagicMock
 from main import FXAnalyzerPro
 
@@ -27,6 +28,7 @@ def analyzer(tmp_path):
 trading:
   symbols:
     - "USDJPY=X"
+    - "EURJPY=X"
   interval: "1h"
   period: "3mo"
 logic:
@@ -39,34 +41,33 @@ logic:
     length: 14
     buy_threshold: 30
     sell_threshold: 70
-risk:
-  stop_loss_pct: 0.01
+  risk:
+    stop_loss_pct: 0.01
 """
     config_file = tmp_path / "config.yaml"
-    config_file.write_text(config_text)
+    config_file.write_text(config_text, encoding="utf-8")
     a = FXAnalyzerPro(config_path=str(config_file))
+    # 出力先も一時ディレクトリに隔離
     a.output_dir = str(tmp_path / "charts")
     os.makedirs(a.output_dir, exist_ok=True)
     return a
 
 
-def _make_df(closes, interval="1h"):
+def _make_df(closes, interval="1h", multi_index=False):
     """テスト用の OHLC DataFrame を生成する。"""
     idx = pd.date_range("2024-01-01", periods=len(closes), freq="h")
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "Open":  closes,
         "High":  [c + 0.1 for c in closes],
         "Low":   [c - 0.1 for c in closes],
         "Close": closes,
         "Volume": [1000] * len(closes),
     }, index=idx)
-
-
-def _make_analyzed_df(analyzer, closes):
-    """analyze() が受け取る前処理済み DataFrame（指標列付き）を返す。"""
-    df = _make_df(closes)
-    sig, lv, time, price, sl, df_out = analyzer.analyze(df)
-    return df_out
+    
+    if multi_index:
+        # yfinance の最新仕様を模した MultiIndex (Price, Symbol)
+        df.columns = pd.MultiIndex.from_product([df.columns, ["USDJPY=X"]])
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,16 @@ class TestIndicatorCalculation:
         assert not math.isnan(df_out["MACD"].iloc[-1])
         assert not math.isnan(df_out["RSI"].iloc[-1])
 
+    def test_multiindex_column_flattening(self, analyzer):
+        """yfinance特有の MultiIndex カラムが正しくフラット化されるか検証。"""
+        df_multi = _make_df([150.0] * 50, multi_index=True)
+        # fetch_data 内のロジックが正常にカラムを処理できるか
+        with patch("main.yf.download", return_value=df_multi):
+            df_fetched = analyzer.fetch_data("USDJPY=X")
+            # columns が MultiIndex ではなく Index であること、'Close' が存在することを確認
+            assert not isinstance(df_fetched.columns, pd.MultiIndex)
+            assert "Close" in df_fetched.columns
+
 
 # ---------------------------------------------------------------------------
 # ブラックボックステスト: analyze_row の状態遷移
@@ -130,311 +141,182 @@ class TestAnalyzeRow:
         assert lv == 0
 
     # --- BUY 系 ---
-
     def test_buy_lv1_golden_cross_above_zero(self, analyzer):
-        """MACD が 0 より上でゴールデンクロス → Lv.1（0ライン条件を満たさない）。"""
+        """MACD が 0 より上でゴールデンクロス → Lv.1。"""
         prev = self._row(macd=0.1, signal=0.2, rsi=40)
         curr = self._row(macd=0.3, signal=0.2, rsi=40)
-        sig, lv = analyzer.analyze_row(
-            prev, curr,
-            analyzer.config["logic"],
-            "MACD", "MACDs", "RSI"
-        )
-        assert sig == "BUY"
-        assert lv == 1
+        sig, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
+        assert sig == "BUY" and lv == 1
 
     def test_buy_lv2_golden_cross_below_zero(self, analyzer):
         """MACD が 0 より下でゴールデンクロス かつ RSI が Lv.3範囲外 → Lv.2。"""
-        prev = self._row(macd=-0.3, signal=-0.1, rsi=51)  # 30〜50 の範囲外
-        curr = self._row(macd=-0.05, signal=-0.1, rsi=51)
-        sig, lv = analyzer.analyze_row(
-            prev, curr,
-            analyzer.config["logic"],
-            "MACD", "MACDs", "RSI"
-        )
-        assert sig == "BUY"
-        assert lv == 2
+        prev = self._row(macd=-0.3, signal=-0.1, rsi=55)
+        curr = self._row(macd=-0.05, signal=-0.1, rsi=55)
+        sig, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
+        assert sig == "BUY" and lv == 2
 
     def test_buy_lv3_rsi_in_range(self, analyzer):
         """MACD が 0 より下でゴールデンクロス かつ RSI が 30〜50 → Lv.3。"""
         prev = self._row(macd=-0.3, signal=-0.1, rsi=40)
         curr = self._row(macd=-0.05, signal=-0.1, rsi=40)
-        sig, lv = analyzer.analyze_row(
-            prev, curr,
-            analyzer.config["logic"],
-            "MACD", "MACDs", "RSI"
-        )
-        assert sig == "BUY"
-        assert lv == 3
+        sig, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
+        assert sig == "BUY" and lv == 3
 
     # --- SELL 系 ---
-
     def test_sell_lv1_dead_cross_below_zero(self, analyzer):
         """MACD が 0 より下でデッドクロス → Lv.1。"""
         prev = self._row(macd=-0.1, signal=-0.2, rsi=60)
         curr = self._row(macd=-0.3, signal=-0.2, rsi=60)
-        sig, lv = analyzer.analyze_row(
-            prev, curr,
-            analyzer.config["logic"],
-            "MACD", "MACDs", "RSI"
-        )
-        assert sig == "SELL"
-        assert lv == 1
+        sig, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
+        assert sig == "SELL" and lv == 1
 
     def test_sell_lv2_dead_cross_above_zero(self, analyzer):
         """MACD が 0 より上でデッドクロス かつ RSI が Lv.3範囲外 → Lv.2。"""
-        prev = self._row(macd=0.3, signal=0.1, rsi=49)  # 50〜70 の範囲外
-        curr = self._row(macd=0.05, signal=0.1, rsi=49)
-        sig, lv = analyzer.analyze_row(
-            prev, curr,
-            analyzer.config["logic"],
-            "MACD", "MACDs", "RSI"
-        )
-        assert sig == "SELL"
-        assert lv == 2
+        prev = self._row(macd=0.3, signal=0.1, rsi=45)
+        curr = self._row(macd=0.05, signal=0.1, rsi=45)
+        sig, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
+        assert sig == "SELL" and lv == 2
 
     def test_sell_lv3_rsi_in_range(self, analyzer):
         """MACD が 0 より上でデッドクロス かつ RSI が 50〜70 → Lv.3。"""
         prev = self._row(macd=0.3, signal=0.1, rsi=60)
         curr = self._row(macd=0.05, signal=0.1, rsi=60)
-        sig, lv = analyzer.analyze_row(
-            prev, curr,
-            analyzer.config["logic"],
-            "MACD", "MACDs", "RSI"
-        )
-        assert sig == "SELL"
-        assert lv == 3
-
-    # --- 境界値: BUY Lv.3 の RSI 境界 ---
-
-    def test_buy_lv3_rsi_boundary_lower(self, analyzer):
-        """RSI = 30（下限境界）→ Lv.3 になる。"""
-        prev = self._row(macd=-0.3, signal=-0.1, rsi=30)
-        curr = self._row(macd=-0.05, signal=-0.1, rsi=30)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 3
-
-    def test_buy_lv3_rsi_boundary_upper(self, analyzer):
-        """RSI = 50（上限境界）→ Lv.3 になる。"""
-        prev = self._row(macd=-0.3, signal=-0.1, rsi=50)
-        curr = self._row(macd=-0.05, signal=-0.1, rsi=50)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 3
-
-    def test_buy_lv2_rsi_just_above_upper_boundary(self, analyzer):
-        """RSI = 51（上限超え）→ Lv.3 にならず Lv.2 に留まる。"""
-        prev = self._row(macd=-0.3, signal=-0.1, rsi=51)
-        curr = self._row(macd=-0.05, signal=-0.1, rsi=51)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 2
-
-    def test_buy_lv2_rsi_just_below_lower_boundary(self, analyzer):
-        """RSI = 29（下限未満）→ Lv.3 にならず Lv.2 に留まる。"""
-        prev = self._row(macd=-0.3, signal=-0.1, rsi=29)
-        curr = self._row(macd=-0.05, signal=-0.1, rsi=29)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 2
-
-    # --- 境界値: SELL Lv.3 の RSI 境界 ---
-
-    def test_sell_lv3_rsi_boundary_lower(self, analyzer):
-        """RSI = 50（下限境界）→ Lv.3 になる。"""
-        prev = self._row(macd=0.3, signal=0.1, rsi=50)
-        curr = self._row(macd=0.05, signal=0.1, rsi=50)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 3
-
-    def test_sell_lv3_rsi_boundary_upper(self, analyzer):
-        """RSI = 70（上限境界）→ Lv.3 になる。"""
-        prev = self._row(macd=0.3, signal=0.1, rsi=70)
-        curr = self._row(macd=0.05, signal=0.1, rsi=70)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 3
-
-    def test_sell_lv2_rsi_just_below_lower_boundary(self, analyzer):
-        """RSI = 49（下限未満）→ Lv.3 にならず Lv.2 に留まる。"""
-        prev = self._row(macd=0.3, signal=0.1, rsi=49)
-        curr = self._row(macd=0.05, signal=0.1, rsi=49)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 2
-
-    def test_sell_lv2_rsi_just_above_upper_boundary(self, analyzer):
-        """RSI = 71（上限超え）→ Lv.3 にならず Lv.2 に留まる。"""
-        prev = self._row(macd=0.3, signal=0.1, rsi=71)
-        curr = self._row(macd=0.05, signal=0.1, rsi=71)
-        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert lv == 2
-
-    def test_rsi_50_buy_lv3(self, analyzer):
-        """RSI = 50 は BUY Lv.3 の上限境界でもあり Lv.3 になる。"""
-        prev = self._row(macd=-0.3, signal=-0.1, rsi=50)
-        curr = self._row(macd=-0.05, signal=-0.1, rsi=50)
         sig, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert sig == "BUY"
-        assert lv == 3
+        assert sig == "SELL" and lv == 3
 
-    def test_rsi_50_sell_lv3(self, analyzer):
-        """RSI = 50 は SELL Lv.3 の下限境界でもあり Lv.3 になる（BUY/SELL は別判定）。"""
-        prev = self._row(macd=0.3, signal=0.1, rsi=50)
-        curr = self._row(macd=0.05, signal=0.1, rsi=50)
-        sig, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
-        assert sig == "SELL"
-        assert lv == 3
+    # --- 境界値検証 ---
+    @pytest.mark.parametrize("rsi_val, expected_lv", [
+        (29.9, 2), (30.0, 3), (40.0, 3), (50.0, 3), (50.1, 2)
+    ])
+    def test_buy_lv3_rsi_boundaries(self, analyzer, rsi_val, expected_lv):
+        """BUY Lv.3 における RSI の境界値を網羅。"""
+        prev = self._row(macd=-0.2, signal=-0.1, rsi=rsi_val)
+        curr = self._row(macd=-0.05, signal=-0.1, rsi=rsi_val)
+        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
+        assert lv == expected_lv
+
+    @pytest.mark.parametrize("rsi_val, expected_lv", [
+        (49.9, 2), (50.0, 3), (60.0, 3), (70.0, 3), (70.1, 2)
+    ])
+    def test_sell_lv3_rsi_boundaries(self, analyzer, rsi_val, expected_lv):
+        """SELL Lv.3 における RSI の境界値を網羅。"""
+        prev = self._row(macd=0.2, signal=0.1, rsi=rsi_val)
+        curr = self._row(macd=0.05, signal=0.1, rsi=rsi_val)
+        _, lv = analyzer.analyze_row(prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI")
+        assert lv == expected_lv
 
 
 # ---------------------------------------------------------------------------
-# ブラックボックステスト: analyze() のシグナル出力と損切り価格
+# ブラックボックステスト: analyze() の出力
 # ---------------------------------------------------------------------------
 
 class TestAnalyze:
 
-    def test_stop_loss_buy(self, analyzer):
-        """BUY シグナル時の損切り価格は エントリー価格 × (1 - stop_loss_pct)。"""
-        # 単調増加 → GC 状態を analyze() 経由で再現するのは難しいため
-        # HOLD ケースで sl_price が None になることを確認する
-        closes = [150.0] * 60
-        df = _make_df(closes)
-        sig, lv, _, price, sl, _ = analyzer.analyze(df)
-        # 定数系列は HOLD になるはず
-        assert sig == "HOLD"
-        assert sl is None
-
     def test_data_shortage_returns_early(self, analyzer):
         """データが 1 本以下のとき DATA_SHORTAGE を返す。"""
         df = _make_df([150.0])
-        sig, lv, time, price, sl, _ = analyzer.analyze(df)
+        sig, lv, _, _, _, _ = analyzer.analyze(df)
         assert sig == "DATA_SHORTAGE"
-        assert lv == 0
 
-    def test_stop_loss_price_formula_buy(self, analyzer):
-        """stop_loss_pct=0.01 のとき、BUY の損切り価格は price * 0.99 になる。"""
-        pct = analyzer.config["risk"]["stop_loss_pct"]
-        price = 150.0
-        expected_sl = price * (1 - pct)
-        assert abs(expected_sl - 148.5) < 1e-9
+    def test_stop_loss_calculation_logic(self, analyzer):
+        """損切り価格の計算式が BUY/SELL で正しい方向を向いているか。"""
+        # BUY シグナルをエミュレートするデータ
+        closes = [100.0] * 40 + [101.0, 102.0, 103.0, 104.0, 105.0]
+        df = _make_df(closes)
+        # analyze_row をパッチして強制的に BUY を返す
+        with patch.object(FXAnalyzerPro, 'analyze_row', return_value=("BUY", 3)):
+            sig, lv, time, price, sl, _ = analyzer.analyze(df)
+            assert sig == "BUY"
+            assert sl < price  # 損切りは下にあるはず
+            assert np.isclose(sl, price * (1 - analyzer.config["risk"]["stop_loss_pct"]))
 
-    def test_stop_loss_price_formula_sell(self, analyzer):
-        """stop_loss_pct=0.01 のとき、SELL の損切り価格は price * 1.01 になる。"""
-        pct = analyzer.config["risk"]["stop_loss_pct"]
-        price = 150.0
-        expected_sl = price * (1 + pct)
-        assert abs(expected_sl - 151.5) < 1e-9
+        # SELL シグナルをエミュレート
+        with patch.object(FXAnalyzerPro, 'analyze_row', return_value=("SELL", 3)):
+            sig, lv, time, price, sl, _ = analyzer.analyze(df)
+            assert sig == "SELL"
+            assert sl > price  # 損切りは上にあるはず
+            assert np.isclose(sl, price * (1 + analyzer.config["risk"]["stop_loss_pct"]))
 
 
 # ---------------------------------------------------------------------------
-# 堅牢性テスト
+# 堅牢性・異常系テスト
 # ---------------------------------------------------------------------------
 
 class TestRobustness:
 
     def test_all_same_price_no_exception(self, analyzer):
-        """全値が同一のとき（RSI の avg_loss=0）例外が発生しない。"""
+        """全値が同一のとき（RSI の avg_loss=0）ゼロ除算等が発生しない。"""
         closes = [150.0] * 60
         df = _make_df(closes)
-        try:
-            analyzer.analyze(df)
-        except Exception as e:
-            pytest.fail(f"定数系列で例外が発生: {e}")
+        sig, lv, _, _, _, _ = analyzer.analyze(df)
+        assert sig in ["HOLD", "DATA_SHORTAGE"]
 
     def test_nan_in_close_no_exception(self, analyzer):
-        """Close に NaN が含まれていても例外が発生しない。"""
+        """Close に NaN が含まれていても計算が続行できる。"""
         closes = [150.0] * 30 + [float("nan")] * 5 + [151.0] * 25
         df = _make_df(closes)
-        try:
-            analyzer.analyze(df)
-        except Exception as e:
-            pytest.fail(f"NaN 含有系列で例外が発生: {e}")
+        sig, _, _, _, _, _ = analyzer.analyze(df)
+        assert sig != "INDICATOR_CALC_ERROR"
 
-    def test_minimum_required_rows(self, analyzer):
-        """2本以下のデータで DATA_SHORTAGE が返る。"""
-        for n in [0, 1]:
-            df = _make_df([150.0] * n) if n > 0 else pd.DataFrame(
-                columns=["Open", "High", "Low", "Close", "Volume"]
-            )
-            sig, lv, _, _, _, _ = analyzer.analyze(df)
-            assert sig == "DATA_SHORTAGE"
-
-
-# ---------------------------------------------------------------------------
-# 副作用テスト: generate_chart のファイル出力
-# ---------------------------------------------------------------------------
-
-class TestGenerateChart:
-
-    def test_chart_file_is_created(self, analyzer, tmp_path):
-        """generate_chart() を呼ぶと charts/ に PNG ファイルが生成される。"""
-        analyzer.output_dir = str(tmp_path / "charts")
-        os.makedirs(analyzer.output_dir, exist_ok=True)
-
-        closes = [150.0 + i * 0.05 for i in range(60)]
-        df = _make_df(closes)
-        _, _, _, _, _, df_analyzed = analyzer.analyze(df)
-
-        import datetime
-        dummy_time = datetime.datetime(2024, 1, 1, 9, 0)
-
-        path = analyzer.generate_chart(
-            df_analyzed,
-            symbol="USDJPY=X",
-            signal="HOLD",
-            current_level=0,
-            time=dummy_time,
-            price=150.0,
-            config=analyzer.config,
-        )
-
-        assert os.path.exists(path), f"チャートファイルが見つかりません: {path}"
-        assert path.endswith(".png")
-
-    def test_chart_saved_in_output_dir(self, analyzer, tmp_path):
-        """生成された PNG が output_dir 配下に保存される。"""
-        output_dir = str(tmp_path / "charts_isolated")
-        os.makedirs(output_dir, exist_ok=True)
-        analyzer.output_dir = output_dir
-
-        closes = [150.0 + i * 0.05 for i in range(60)]
-        df = _make_df(closes)
-        _, _, _, _, _, df_analyzed = analyzer.analyze(df)
-
-        import datetime
-        dummy_time = datetime.datetime(2024, 6, 1, 12, 0)
-
-        path = analyzer.generate_chart(
-            df_analyzed,
-            symbol="USDJPY=X",
-            signal="HOLD",
-            current_level=0,
-            time=dummy_time,
-            price=150.0,
-            config=analyzer.config,
-        )
-
-        assert os.path.dirname(path) == output_dir
-
-
-# ---------------------------------------------------------------------------
-# fetch_data のモックテスト
-# ---------------------------------------------------------------------------
-
-class TestFetchData:
-
-    def test_fetch_data_calls_yfinance(self, analyzer):
-        """fetch_data() が yfinance.download を呼び出すことを確認する。"""
-        mock_df = _make_df([150.0] * 30)
-
-        with patch("main.yf.download", return_value=mock_df) as mock_dl:
+    def test_yfinance_download_error_handling(self, analyzer):
+        """yfinance が例外を投げた場合、空の DataFrame を返して続行するか。"""
+        with patch("main.yf.download", side_effect=Exception("API Error")):
             result = analyzer.fetch_data("USDJPY=X")
-            mock_dl.assert_called_once()
-            assert not result.empty
+            assert result.empty
 
-    def test_fetch_data_short_interval_overrides_period(self, analyzer):
-        """1m・5m 足では period が自動的に '1d' に上書きされる。"""
+
+# ---------------------------------------------------------------------------
+# 副作用・統合テスト
+# ---------------------------------------------------------------------------
+
+class TestIntegration:
+
+    def test_generate_chart_file_output(self, analyzer, tmp_path):
+        """チャートファイルが指定のディレクトリに PNG として保存される。"""
+        closes = [150.0 + i * 0.05 for i in range(60)]
+        df = _make_df(closes)
+        _, _, _, _, _, df_analyzed = analyzer.analyze(df)
+
+        path = analyzer.generate_chart(
+            df_analyzed, "USDJPY=X", "HOLD", 0, 
+            datetime.datetime.now(), 150.0, analyzer.config
+        )
+
+        assert os.path.exists(path)
+        assert path.endswith(".png")
+        assert os.path.dirname(path) == analyzer.output_dir
+
+    def test_run_full_scan_loop(self, analyzer):
+        """全通貨スキャンの流れをモックで検証。"""
+        mock_df = _make_df([150.0] * 50)
+        
+        with patch.object(analyzer, 'fetch_data', return_value=mock_df) as mock_fetch, \
+             patch.object(analyzer, 'generate_chart', return_value="dummy.png") as mock_chart:
+            
+            results = analyzer.run_full_scan()
+            
+            # config で定義した 2 通貨分呼ばれているか
+            assert mock_fetch.call_count == 2
+            assert len(results) == 2
+            # 各結果に必須項目が含まれているか
+            assert all(k in results[0] for k in ["symbol", "signal", "level", "chart_path"])
+
+    def test_fetch_data_interval_adjustment(self, analyzer):
+        """1m, 5m 足の時に period が '1d' に自動調整されるか。"""
         analyzer.config["trading"]["interval"] = "1m"
-        mock_df = _make_df([150.0] * 60)
-
-        with patch("main.yf.download", return_value=mock_df) as mock_dl:
+        with patch("main.yf.download", return_value=_make_df([150]*10)) as mock_dl:
             analyzer.fetch_data("USDJPY=X")
             _, kwargs = mock_dl.call_args
-            # period が "1d" で呼ばれているか確認
-            called_period = mock_dl.call_args[1].get("period") or mock_dl.call_args[0][1]
-            assert called_period == "1d"
+            assert kwargs["period"] == "1d"
+
+
+# ---------------------------------------------------------------------------
+# エッジケース: 設定のフォールバック
+# ---------------------------------------------------------------------------
+
+def test_config_load_fallback(tmp_path):
+    """設定ファイルが欠落している場合、デフォルト値で初期化されるか。"""
+    with patch("builtins.open", side_effect=FileNotFoundError):
+        analyzer = FXAnalyzerPro("non_existent.yaml")
+        assert "trading" in analyzer.config
+        assert "symbols" in analyzer.config["trading"]
