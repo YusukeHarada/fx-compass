@@ -144,9 +144,9 @@ class TestAnalyzeRow:
         assert lv == 1
 
     def test_buy_lv2_golden_cross_below_zero(self, analyzer):
-        """MACD が 0 より下でゴールデンクロス → Lv.2。"""
-        prev = self._row(macd=-0.3, signal=-0.1, rsi=40)
-        curr = self._row(macd=-0.05, signal=-0.1, rsi=40)
+        """MACD が 0 より下でゴールデンクロス かつ RSI が Lv.3範囲外 → Lv.2。"""
+        prev = self._row(macd=-0.3, signal=-0.1, rsi=51)  # 30〜50 の範囲外
+        curr = self._row(macd=-0.05, signal=-0.1, rsi=51)
         sig, lv = analyzer.analyze_row(
             prev, curr,
             analyzer.config["logic"],
@@ -182,9 +182,9 @@ class TestAnalyzeRow:
         assert lv == 1
 
     def test_sell_lv2_dead_cross_above_zero(self, analyzer):
-        """MACD が 0 より上でデッドクロス → Lv.2。"""
-        prev = self._row(macd=0.3, signal=0.1, rsi=60)
-        curr = self._row(macd=0.05, signal=0.1, rsi=60)
+        """MACD が 0 より上でデッドクロス かつ RSI が Lv.3範囲外 → Lv.2。"""
+        prev = self._row(macd=0.3, signal=0.1, rsi=49)  # 50〜70 の範囲外
+        curr = self._row(macd=0.05, signal=0.1, rsi=49)
         sig, lv = analyzer.analyze_row(
             prev, curr,
             analyzer.config["logic"],
@@ -308,15 +308,14 @@ class TestAnalyze:
 
     def test_stop_loss_price_formula_buy(self, analyzer):
         """stop_loss_pct=0.01 のとき、BUY の損切り価格は price * 0.99 になる。"""
-        # analyze_row を直接呼んでレベルを確認したうえで価格計算式を検証
-        pct = analyzer.config["logic"]["risk"]["stop_loss_pct"]
+        pct = analyzer.config["risk"]["stop_loss_pct"]
         price = 150.0
         expected_sl = price * (1 - pct)
         assert abs(expected_sl - 148.5) < 1e-9
 
     def test_stop_loss_price_formula_sell(self, analyzer):
         """stop_loss_pct=0.01 のとき、SELL の損切り価格は price * 1.01 になる。"""
-        pct = analyzer.config["logic"]["risk"]["stop_loss_pct"]
+        pct = analyzer.config["risk"]["stop_loss_pct"]
         price = 150.0
         expected_sl = price * (1 + pct)
         assert abs(expected_sl - 151.5) < 1e-9
