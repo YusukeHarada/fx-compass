@@ -3,16 +3,16 @@ name = "fx-compass"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "pytest",
-    "pytest-cov"
-]
-
-[project.optional-dependencies]
-dev = [
     "yfinance",
     "pandas",
     "PyYAML",
     "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov"
 ]
 
 [build-system]
