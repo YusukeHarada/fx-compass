@@ -22,7 +22,11 @@ FX-Compass Proは、為替相場のテクニカル分析を自動化し、統計
 #### セットアップ
 
 ```bash
-pip install -r requirements.txt
+# 本番依存のみインストール
+pip install .
+
+# 開発・テスト用依存も含めてインストール
+pip install -e ".[dev]"
 ```
 
 #### 実行方法

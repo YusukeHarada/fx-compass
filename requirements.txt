@@ -1,6 +1,0 @@
-yfinance
-pandas
-PyYAML
-matplotlib
-pytest
-pytest-cov

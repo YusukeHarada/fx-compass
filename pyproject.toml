@@ -1,0 +1,26 @@
+[project]
+name = "fx-compass"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest",
+    "pytest-cov"
+]
+
+[project.optional-dependencies]
+dev = [
+    "yfinance",
+    "pandas",
+    "PyYAML",
+    "matplotlib",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
