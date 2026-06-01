@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.request
 
@@ -79,8 +80,8 @@ def _notify_discord(message: str, webhook_url: str) -> None:
     try:
         with urllib.request.urlopen(req, timeout=10) as _:
             pass
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Discord 通知失敗: {e}", file=sys.stderr)
 
 
 # ------------------------------------------------------------------

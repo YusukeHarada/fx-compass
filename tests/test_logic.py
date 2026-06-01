@@ -1022,10 +1022,11 @@ class TestNotifyDiscord:
         assert req.full_url == webhook
         assert req.get_header("Content-type") == "application/json"
 
-    def test_exception_does_not_crash(self):
-        """urllib エラー時にクラッシュしない。"""
+    def test_exception_does_not_crash(self, capsys):
+        """urllib エラー時にクラッシュせず stderr に警告を出力する。"""
         with patch("urllib.request.urlopen", side_effect=Exception("network error")):
-            _notify_discord("test", "https://discord.com/api/webhooks/x/y")  # 例外が外に出ないこと
+            _notify_discord("test", "https://discord.com/api/webhooks/x/y")
+        assert "Discord 通知失敗" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
