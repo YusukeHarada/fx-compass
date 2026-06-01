@@ -3,7 +3,12 @@ name: FX Signal Scan
 on:
   schedule:
     - cron: "0 * * * 1-5"  # 平日の毎時0分 UTC（日本時間 9〜翌9時）
-  workflow_dispatch:         # GitHub Actions UI から手動実行も可能
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: "テスト通知を送信する（動作確認用）"
+        type: boolean
+        default: false
 
 jobs:
   scan:
@@ -14,6 +19,23 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install .
+      - name: Test notification
+        if: inputs.test_notification == true
+        run: |
+          python -c "
+          import os, json, urllib.request
+          url = os.environ.get('DISCORD_WEBHOOK_URL', '')
+          req = urllib.request.Request(
+              url,
+              data=json.dumps({'content': '**[FX-Compass]** テスト通知 — GitHub Actions から正常に送信できています'}).encode(),
+              headers={'Content-Type': 'application/json'},
+              method='POST',
+          )
+          urllib.request.urlopen(req)
+          print('テスト通知を送信しました')
+          "
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       - name: Verify secret
         run: python -c "import os; url=os.environ.get('DISCORD_WEBHOOK_URL',''); print('DISCORD_WEBHOOK_URL set:', bool(url), '/ length:', len(url))"
         env:
