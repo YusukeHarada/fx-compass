@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install .
-      - name: Test notification (curl)
+      - name: Test notification
         if: inputs.test_notification == true
         run: |
           curl -s -o /dev/null -w "HTTP status: %{http_code}\n" \
@@ -27,10 +27,6 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"content": "**[FX-Compass]** テスト通知 — GitHub Actions から送信"}' \
             "$DISCORD_WEBHOOK_URL"
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      - name: Verify secret
-        run: python -c "import os; url=os.environ.get('DISCORD_WEBHOOK_URL',''); print('set:', bool(url), '/ len:', len(url), '/ prefix:', url[:34])"
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       - run: python main.py --min-level 2
