@@ -456,12 +456,12 @@ class TestAnalyze:
         assert abs(price * (1 + pct) - 151.5) < 1e-9
 
     def test_returns_correct_price_and_time(self, analyzer):
-        """price と time が DataFrame の末尾と一致する。"""
+        """price と time が確定足（末尾から2番目）と一致する。"""
         closes = [150.0 + i * 0.01 for i in range(60)]
         df = _make_df(closes)
         _, _, time, price, _, df_out = analyzer.analyze(df)
-        assert time == df_out.index[-1]
-        assert abs(float(price) - df_out.iloc[-1]["Close"]) < 1e-9
+        assert time == df_out.index[-2]
+        assert abs(float(price) - df_out.iloc[-2]["Close"]) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -520,9 +520,15 @@ class TestRobustness:
         sig, lv, _, _, _, df_out = analyzer.analyze(df)
         assert "RSI" in df_out.columns
 
-    def test_two_rows_minimum(self, analyzer):
-        """2 本ちょうどのデータでは DATA_SHORTAGE にならない。"""
+    def test_two_rows_data_shortage(self, analyzer):
+        """2 本のデータは DATA_SHORTAGE になる（形成中足を除くと確定足が1本のみ）。"""
         df = _make_df([150.0, 151.0])
+        sig, _, _, _, _, _ = analyzer.analyze(df)
+        assert sig == "DATA_SHORTAGE"
+
+    def test_three_rows_minimum(self, analyzer):
+        """3 本ちょうどのデータでは DATA_SHORTAGE にならない。"""
+        df = _make_df([150.0, 151.0, 152.0])
         sig, _, _, _, _, _ = analyzer.analyze(df)
         assert sig != "DATA_SHORTAGE"
 

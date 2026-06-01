@@ -215,12 +215,14 @@ class FXAnalyzerPro:
         sl_price   : float | None
         df_out     : DataFrame  指標列付きの DataFrame
         """
-        if len(df) < 2:
+        if len(df) < 3:
             return "DATA_SHORTAGE", 0, None, None, None, df
 
         df_out   = self._calc_indicators(df)
+        # iloc[-1] は yfinance が返す形成中の未確定足。
+        # シグナル判定は確定済みの直近2本（iloc[-3], iloc[-2]）のみ使用する。
         sig_type, level = self.analyze_row(
-            df_out.iloc[-2], df_out.iloc[-1],
+            df_out.iloc[-3], df_out.iloc[-2],
             self.config['logic'], 'MACD', 'MACDs', 'RSI'
         )
 
@@ -228,7 +230,7 @@ class FXAnalyzerPro:
 
         sl_price = None
         if level > 0:
-            last  = df_out.iloc[-1]
+            last  = df_out.iloc[-2]  # 確定足の終値を基準にする
             r_cfg = self.config.get('risk', {})
             atr   = last.get('ATR', float('nan'))
             if not pd.isna(atr) and atr > 0:
@@ -238,7 +240,7 @@ class FXAnalyzerPro:
                 pct      = r_cfg.get('stop_loss_pct', 0.01)
                 sl_price = last['Close'] * ((1 - pct) if sig_type == "BUY" else (1 + pct))
 
-        return signal_msg, level, df_out.index[-1], df_out.iloc[-1]['Close'], sl_price, df_out
+        return signal_msg, level, df_out.index[-2], df_out.iloc[-2]['Close'], sl_price, df_out
 
     # ------------------------------------------------------------------
     # Presentation 層
