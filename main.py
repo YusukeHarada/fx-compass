@@ -1,8 +1,10 @@
 import argparse
+import http.client
 import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 import matplotlib
@@ -90,19 +92,31 @@ def _notify_discord(message: str, webhook_url: str, chart_paths: list | None = N
                 body += crlf
                 body += file_data + crlf
             body += f"--{boundary}--".encode() + crlf
-            headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+            # multipart は http.client で直接送信（urllib のハンドラ干渉を回避）
+            parsed = urllib.parse.urlparse(webhook_url)
+            path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            conn = http.client.HTTPSConnection(parsed.netloc, timeout=10)
+            conn.request(
+                "POST", path, body=body,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(len(body)),
+                },
+            )
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            if resp.status not in (200, 204):
+                raise Exception(f"HTTP Error {resp.status}: {resp.reason}")
         else:
-            body = json.dumps({"content": message}).encode()
-            headers = {"Content-Type": "application/json"}
-
-        req = urllib.request.Request(
-            webhook_url,
-            data=body,
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as _:
-            pass
+            req = urllib.request.Request(
+                webhook_url,
+                data=json.dumps({"content": message}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as _:
+                pass
     except Exception as e:
         print(f"[WARN] Discord 通知失敗: {e}", file=sys.stderr)
 
