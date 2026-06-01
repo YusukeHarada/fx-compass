@@ -9,6 +9,10 @@ on:
         description: "テスト通知を送信する（動作確認用）"
         type: boolean
         default: false
+      test_chart:
+        description: "チャート画像添付をテストする（動作確認用）"
+        type: boolean
+        default: false
       min_level:
         description: "通知最低レベル（1=WATCH〜4=CONFIRMED、デフォルト2）"
         type: choice
@@ -24,6 +28,32 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install .
+      - name: Test chart notification
+        if: inputs.test_chart == true
+        run: |
+          python - <<'EOF'
+          import matplotlib
+          matplotlib.use('Agg')
+          import matplotlib.pyplot as plt
+          import os, sys
+          sys.path.insert(0, '.')
+          from main import _notify_discord
+
+          fig, ax = plt.subplots(figsize=(10, 5))
+          ax.set_facecolor('#fdfaf4')
+          ax.plot([1,2,3,4,5], [100,102,101,103,105], color='#2c3e50', linewidth=2, label='Price')
+          ax.set_title('FX-Compass テスト: BUY CONFIRMED (Lv.4)', fontsize=14, fontweight='bold')
+          ax.legend(); ax.grid(alpha=0.3)
+          path = '/tmp/test_chart.png'
+          plt.savefig(path, dpi=120, bbox_inches='tight')
+          plt.close()
+
+          url = os.environ.get('DISCORD_WEBHOOK_URL')
+          _notify_discord('**[FX-Compass]** チャート添付テスト — USDJPY=X: BUY CONFIRMED (Lv.4) @ 159.488 SL:158.000', url, [path])
+          print('送信完了')
+          EOF
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       - name: Test notification
         if: inputs.test_notification == true
         run: |
