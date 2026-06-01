@@ -69,15 +69,39 @@ def _print_results_table(results: list, title: str = "FX-Compass Pro — Signal 
     console.print(table)
 
 
-def _notify_discord(message: str, webhook_url: str) -> None:
-    """Discord Webhook でメッセージを送信する。失敗してもスキャンは継続する。"""
-    req = urllib.request.Request(
-        webhook_url,
-        data=json.dumps({"content": message}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def _notify_discord(message: str, webhook_url: str, chart_paths: list | None = None) -> None:
+    """Discord Webhook でメッセージを送信する。chart_paths があれば画像も添付する。"""
     try:
+        if chart_paths:
+            boundary = "FXCompassBoundary"
+            crlf = b"\r\n"
+            body = b""
+            body += f"--{boundary}".encode() + crlf
+            body += b'Content-Disposition: form-data; name="payload_json"' + crlf
+            body += b'Content-Type: application/json' + crlf
+            body += crlf
+            body += json.dumps({"content": message}).encode() + crlf
+            for i, path in enumerate(chart_paths):
+                fname = os.path.basename(path)
+                with open(path, "rb") as f:
+                    file_data = f.read()
+                body += f"--{boundary}".encode() + crlf
+                body += f'Content-Disposition: form-data; name="files[{i}]"; filename="{fname}"'.encode() + crlf
+                body += b'Content-Type: image/png' + crlf
+                body += crlf
+                body += file_data + crlf
+            body += f"--{boundary}--".encode() + crlf
+            headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        else:
+            body = json.dumps({"content": message}).encode()
+            headers = {"Content-Type": "application/json"}
+
+        req = urllib.request.Request(
+            webhook_url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=10) as _:
             pass
     except Exception as e:
@@ -359,19 +383,22 @@ def main(argv=None):
             try:
                 df_raw = analyzer.fetch_data(symbol)
                 sig, lv, t, price, sl, df_final = analyzer.analyze(df_raw)
+                chart_path = None
+                if t and lv >= min_level:
+                    chart_path = analyzer.generate_chart(df_final, symbol, sig, lv, t, price, analyzer.config)
                 if lv >= min_level or lv == 0:
                     results.append({
                         "symbol": symbol, "signal": sig, "level": lv,
                         "price": float(price) if price is not None else None,
                         "sl_price": float(sl) if sl is not None else None,
                         "time": t,
+                        "chart_path": chart_path,
                     })
-                if t and lv >= min_level:
-                    analyzer.generate_chart(df_final, symbol, sig, lv, t, price, analyzer.config)
             except Exception as e:
                 results.append({
                     "symbol": symbol, "signal": f"ERROR: {e}", "level": 0,
                     "price": None, "sl_price": None, "time": None,
+                    "chart_path": None,
                 })
 
         _print_results_table(results)
@@ -384,7 +411,8 @@ def main(argv=None):
                 for r in notify_targets:
                     sl_str = f"{r['sl_price']:.3f}" if r["sl_price"] else "—"
                     lines.append(f"{r['symbol']}: {r['signal']} @ {r['price']:.3f} SL:{sl_str}")
-                _notify_discord("\n".join(lines), webhook_url)
+                chart_paths = [r["chart_path"] for r in notify_targets if r.get("chart_path")]
+                _notify_discord("\n".join(lines), webhook_url, chart_paths or None)
 
         first_run = False
 

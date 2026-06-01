@@ -1028,6 +1028,36 @@ class TestNotifyDiscord:
             _notify_discord("test", "https://discord.com/api/webhooks/x/y")
         assert "Discord 通知失敗" in capsys.readouterr().err
 
+    def test_sends_with_chart_attachment(self, tmp_path):
+        """chart_paths が渡された場合、multipart/form-data で送信される。"""
+        chart = tmp_path / "chart_USDJPY_0900.png"
+        chart.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        webhook = "https://discord.com/api/webhooks/123/abc"
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=MagicMock())
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_cm) as mock_urlopen:
+            _notify_discord("test message", webhook, [str(chart)])
+        mock_urlopen.assert_called_once()
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == webhook
+        assert "multipart/form-data" in req.get_header("Content-type")
+
+    def test_chart_attachment_body_contains_filename(self, tmp_path):
+        """multipart ボディにファイル名と PNG バイトが含まれる。"""
+        chart = tmp_path / "chart_TEST_1200.png"
+        chart.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=MagicMock())
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_cm) as mock_urlopen:
+            _notify_discord("msg", "https://discord.com/api/webhooks/x/y", [str(chart)])
+        req = mock_urlopen.call_args[0][0]
+        assert b"chart_TEST_1200.png" in req.data
+        assert b"\x89PNG" in req.data
+
 
 # ---------------------------------------------------------------------------
 # __main__ ブロック（main() 呼び出し）のカバー
