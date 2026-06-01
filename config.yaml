@@ -1,5 +1,5 @@
 trading:
-  symbols:             # リスト形式に変更
+  symbols:
     - "USDJPY=X"
     - "AUDJPY=X"
     - "MXNJPY=X"
@@ -8,6 +8,7 @@ trading:
     - "GBPUSD=X"
   interval: "1h"       # 1m, 5m, 15m, 1h, 1d
   period: "3mo"        # 1m/5mの場合は実行時に自動で1dに調整されます
+  watch_interval_seconds: 300   # --watch モードのリフレッシュ間隔（秒）
 
 logic:
   mode: "strict"
@@ -19,5 +20,11 @@ logic:
     length: 14
     buy_threshold: 30
     sell_threshold: 70
-  risk:
-    stop_loss_pct: 0.01
+  adx:
+    period: 14
+    threshold: 25       # ADX > 25 でトレンド相場と判定
+
+risk:
+  stop_loss_pct: 0.01   # ATRが取得できない場合のフォールバック
+  atr_period: 14
+  atr_multiplier: 2.0   # ストップロス = エントリー価格 ± ATR × multiplier

@@ -1,14 +1,74 @@
+import argparse
 import os
+import time
 
 import matplotlib
 # GitHub Actions等のGUIがない環境でも動作するようにバックエンドをAggに設定
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import numpy as np
 import pandas as pd
 import yaml
 import yfinance as yf
+from rich.console import Console
+from rich.table import Table
 
+
+# ------------------------------------------------------------------
+# CLI Entry Point
+# ------------------------------------------------------------------
+
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="FX-Compass Pro signal scanner")
+    parser.add_argument(
+        "--symbols", nargs="+", metavar="SYM",
+        help="スキャン対象シンボル（例: USDJPY=X EURJPY=X）"
+    )
+    parser.add_argument(
+        "--interval", choices=["1m", "5m", "15m", "1h", "4h", "1d"],
+        help="時間足（config.yaml を上書き）"
+    )
+    parser.add_argument(
+        "--min-level", type=int, choices=[1, 2, 3, 4], default=1,
+        metavar="LEVEL",
+        help="このレベル以上のシグナルのみ表示（1=WATCH, 2=STANDARD, 3=STRONG, 4=CONFIRMED）"
+    )
+    parser.add_argument(
+        "--watch", action="store_true",
+        help="定期的にスキャンを繰り返す（間隔は config.yaml の watch_interval_seconds）"
+    )
+    return parser.parse_args(argv)
+
+
+def _print_results_table(results: list, title: str = "FX-Compass Pro — Signal Summary") -> None:
+    """スキャン結果を rich テーブルで表示する。"""
+    console = Console()
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("Symbol",  style="cyan",  width=12)
+    table.add_column("Signal",  width=24)
+    table.add_column("Lv.",     justify="center", width=4)
+    table.add_column("Price",   justify="right",  width=10)
+    table.add_column("S/L",     justify="right",  width=10)
+    table.add_column("Time",    width=15)
+
+    level_styles = {0: "dim", 1: "white", 2: "yellow", 3: "bold green", 4: "bold magenta"}
+
+    for r in results:
+        lv = r["level"]
+        style = level_styles.get(lv, "white")
+        sl_str    = f"{r['sl_price']:.3f}" if r["sl_price"] is not None else "—"
+        price_str = f"{r['price']:.3f}"    if r["price"]    is not None else "—"
+        time_str  = r["time"].strftime("%m/%d %H:%M") if r["time"] is not None else "—"
+        lv_str    = str(lv) if lv > 0 else "—"
+        table.add_row(r["symbol"], r["signal"], lv_str, price_str, sl_str, time_str, style=style)
+
+    console.print(table)
+
+
+# ------------------------------------------------------------------
+# FX Analyzer
+# ------------------------------------------------------------------
 
 class FXAnalyzerPro:
 
@@ -27,7 +87,6 @@ class FXAnalyzerPro:
         c = self.config['trading']
         fetch_period = "1d" if c['interval'] in ["1m", "5m"] else c['period']
         df = yf.download(symbol, period=fetch_period, interval=c['interval'], progress=False)
-        # yfinance が MultiIndex を返す場合にフラット化する
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df
@@ -37,28 +96,57 @@ class FXAnalyzerPro:
     # ------------------------------------------------------------------
 
     def _calc_indicators(self, df):
-        """EMA・MACD・RSI を計算して新しい DataFrame を返す（元の df を変更しない）。"""
+        """EMA・MACD・RSI・EMA200・ATR・ADX を計算して新しい DataFrame を返す。"""
         result = df.copy()
         l_cfg = self.config['logic']
+        r_cfg = self.config.get('risk', {})
 
+        # --- MACD ---
         ema_fast = result['Close'].ewm(span=l_cfg['macd']['fast'], adjust=False).mean()
         ema_slow = result['Close'].ewm(span=l_cfg['macd']['slow'], adjust=False).mean()
-        result['MACD'] = ema_fast - ema_slow
+        result['MACD']  = ema_fast - ema_slow
         result['MACDs'] = result['MACD'].ewm(span=l_cfg['macd']['signal'], adjust=False).mean()
 
-        diff = result['Close'].diff()
-        gain = diff.clip(lower=0)
-        loss = -diff.clip(upper=0)
+        # --- RSI ---
+        diff     = result['Close'].diff()
+        gain     = diff.clip(lower=0)
+        loss     = -diff.clip(upper=0)
         avg_gain = gain.rolling(window=l_cfg['rsi']['length']).mean()
         avg_loss = loss.rolling(window=l_cfg['rsi']['length']).mean()
         # avg_loss=0（単調増加）→ RSI=100、avg_gain=0（単調減少）→ RSI=0
-        import numpy as np
-        rsi_values = np.where(
+        result['RSI'] = np.where(
             avg_loss == 0,
             100.0,
             np.where(avg_gain == 0, 0.0, 100 - (100 / (1 + avg_gain / avg_loss)))
         )
-        result['RSI'] = rsi_values
+
+        # --- EMA200 トレンドフィルター ---
+        result['EMA200'] = result['Close'].ewm(span=200, adjust=False).mean()
+        result['trend']  = np.where(
+            result['EMA200'].isna(), np.nan,
+            (result['Close'] > result['EMA200']).astype(float)
+        )
+
+        # --- ATR（True Range の移動平均）---
+        atr_period = r_cfg.get('atr_period', 14)
+        high_low   = result['High'] - result['Low']
+        high_close = (result['High'] - result['Close'].shift(1)).abs()
+        low_close  = (result['Low']  - result['Close'].shift(1)).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        result['ATR'] = true_range.rolling(window=atr_period).mean()
+
+        # --- ADX（方向性指数）---
+        adx_period = l_cfg.get('adx', {}).get('period', 14)
+        up_move    = result['High'].diff()
+        down_move  = -result['Low'].diff()
+        plus_dm    = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm   = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+        sma_tr     = true_range.rolling(adx_period).mean().replace(0, np.nan)
+        plus_di    = 100 * plus_dm.rolling(adx_period).mean() / sma_tr
+        minus_di   = 100 * minus_dm.rolling(adx_period).mean() / sma_tr
+        di_sum     = (plus_di + minus_di).replace(0, np.nan)
+        dx         = 100 * (plus_di - minus_di).abs() / di_sum
+        result['ADX'] = dx.rolling(adx_period).mean()
 
         return result
 
@@ -69,7 +157,7 @@ class FXAnalyzerPro:
         Returns
         -------
         sig_type : str   "BUY" / "SELL" / "HOLD"
-        level    : int   0 (HOLD) / 1 (WATCH) / 2 (STANDARD) / 3 (STRONG)
+        level    : int   0 (HOLD) / 1 (WATCH) / 2 (STANDARD) / 3 (STRONG) / 4 (CONFIRMED)
         """
         is_gold = (prev[m_col] < prev[s_col]) and (curr[m_col] > curr[s_col])
         is_dead = (prev[m_col] > prev[s_col]) and (curr[m_col] < curr[s_col])
@@ -78,19 +166,38 @@ class FXAnalyzerPro:
             level = 1
             if curr[m_col] < 0:
                 level = 3 if 30 <= curr[r_col] <= 50 else 2
-            return "BUY", level
-
-        if is_dead:
+            sig_type = "BUY"
+        elif is_dead:
             level = 1
             if curr[m_col] > 0:
                 level = 3 if 50 <= curr[r_col] <= 70 else 2
-            return "SELL", level
+            sig_type = "SELL"
+        else:
+            return "HOLD", 0
 
-        return "HOLD", 0
+        # Lv.3 のとき EMA200 方向 + ADX 強度が揃えば Lv.4 に昇格
+        if level == 3:
+            adx_threshold = l_cfg.get('adx', {}).get('threshold', 25)
+            adx_val   = curr.get('ADX', float('nan'))
+            trend_val = curr.get('trend', float('nan'))
+            adx_ok  = (not pd.isna(adx_val))   and (adx_val > adx_threshold)
+            ema_ok  = (not pd.isna(trend_val))  and (
+                (sig_type == "BUY"  and trend_val == 1) or
+                (sig_type == "SELL" and trend_val == 0)
+            )
+            if adx_ok and ema_ok:
+                return sig_type, 4
+
+        return sig_type, level
 
     def _build_signal_message(self, sig_type, level):
         """シグナル種別とレベルから表示用メッセージを組み立てる。"""
-        label = {1: "WATCH (Lv.1)", 2: "STANDARD (Lv.2)", 3: "STRONG (Lv.3)"}
+        label = {
+            1: "WATCH (Lv.1)",
+            2: "STANDARD (Lv.2)",
+            3: "STRONG (Lv.3)",
+            4: "CONFIRMED (Lv.4)",
+        }
         if level == 0:
             return "HOLD"
         return f"{sig_type} {label[level]}"
@@ -111,7 +218,7 @@ class FXAnalyzerPro:
         if len(df) < 2:
             return "DATA_SHORTAGE", 0, None, None, None, df
 
-        df_out = self._calc_indicators(df)
+        df_out   = self._calc_indicators(df)
         sig_type, level = self.analyze_row(
             df_out.iloc[-2], df_out.iloc[-1],
             self.config['logic'], 'MACD', 'MACDs', 'RSI'
@@ -121,9 +228,15 @@ class FXAnalyzerPro:
 
         sl_price = None
         if level > 0:
-            pct = self.config['risk']['stop_loss_pct']
-            multiplier = (1 - pct) if sig_type == "BUY" else (1 + pct)
-            sl_price = df_out.iloc[-1]['Close'] * multiplier
+            last  = df_out.iloc[-1]
+            r_cfg = self.config.get('risk', {})
+            atr   = last.get('ATR', float('nan'))
+            if not pd.isna(atr) and atr > 0:
+                mult     = r_cfg.get('atr_multiplier', 2.0)
+                sl_price = last['Close'] - mult * atr if sig_type == "BUY" else last['Close'] + mult * atr
+            else:
+                pct      = r_cfg.get('stop_loss_pct', 0.01)
+                sl_price = last['Close'] * ((1 - pct) if sig_type == "BUY" else (1 + pct))
 
         return signal_msg, level, df_out.index[-1], df_out.iloc[-1]['Close'], sl_price, df_out
 
@@ -133,9 +246,9 @@ class FXAnalyzerPro:
 
     def generate_chart(self, df, symbol, signal, current_level, time, price, config):
         """分析済み DataFrame からシグナルプロット付きチャートを PNG で保存する。"""
-        l_cfg = config['logic']
+        l_cfg   = config['logic']
         plot_df = df.tail(100).copy()
-        dates = plot_df.index
+        dates   = plot_df.index
 
         fig, (ax1, ax2, ax3) = plt.subplots(
             3, 1, figsize=(14, 10), sharex=True,
@@ -155,6 +268,7 @@ class FXAnalyzerPro:
             1: {'BUY': '#90ee90', 'SELL': '#ffcccb', 's': 80},
             2: {'BUY': '#2ecc71', 'SELL': '#e74c3c', 's': 200},
             3: {'BUY': '#f1c40f', 'SELL': '#9b59b6', 's': 450},
+            4: {'BUY': '#ff6600', 'SELL': '#0066ff', 's': 700},
         }
         for i in range(1, len(plot_df)):
             sig_type, lv = self.analyze_row(
@@ -197,19 +311,56 @@ class FXAnalyzerPro:
         return file_path
 
 
-if __name__ == "__main__":
-    analyzer = FXAnalyzerPro()
-    target_symbols = analyzer.config['trading'].get('symbols', ["USDJPY=X"])
+# ------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------
 
-    print("\n--- FX-Compass Pro Multi-Scanner ---")
-    for symbol in target_symbols:
-        try:
-            print(f"分析中: {symbol}...")
-            df_raw = analyzer.fetch_data(symbol)
-            sig, lv, time, price, sl, df_final = analyzer.analyze(df_raw)
-            print(f"  最新判定: {sig} (Lv.{lv})")
-            if time:
-                path = analyzer.generate_chart(df_final, symbol, sig, lv, time, price, analyzer.config)
-                print(f"  チャート生成完了: {path}")
-        except Exception as e:
-            print(f"  {symbol} エラー: {e}")
+def main(argv=None):
+    args    = _parse_args(argv)
+    analyzer = FXAnalyzerPro()
+
+    # CLI オプションで config をメモリ上書き
+    if args.symbols:
+        analyzer.config['trading']['symbols'] = args.symbols
+    if args.interval:
+        analyzer.config['trading']['interval'] = args.interval
+
+    target_symbols = analyzer.config['trading'].get('symbols', ["USDJPY=X"])
+    interval_sec   = analyzer.config['trading'].get('watch_interval_seconds', 300)
+    min_level      = args.min_level
+
+    first_run = True
+    while True:
+        results = []
+        if not first_run:
+            Console().print(f"\n[dim]--- リフレッシュ中 ({interval_sec}秒後に次回スキャン) ---[/dim]")
+
+        for symbol in target_symbols:
+            try:
+                df_raw = analyzer.fetch_data(symbol)
+                sig, lv, t, price, sl, df_final = analyzer.analyze(df_raw)
+                if lv >= min_level or lv == 0:
+                    results.append({
+                        "symbol": symbol, "signal": sig, "level": lv,
+                        "price": float(price) if price is not None else None,
+                        "sl_price": float(sl) if sl is not None else None,
+                        "time": t,
+                    })
+                if t and lv >= min_level:
+                    analyzer.generate_chart(df_final, symbol, sig, lv, t, price, analyzer.config)
+            except Exception as e:
+                results.append({
+                    "symbol": symbol, "signal": f"ERROR: {e}", "level": 0,
+                    "price": None, "sl_price": None, "time": None,
+                })
+
+        _print_results_table(results)
+        first_run = False
+
+        if not args.watch:
+            break
+        time.sleep(interval_sec)
+
+
+if __name__ == "__main__":
+    main()

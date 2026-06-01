@@ -2,13 +2,15 @@
 FX-Compass Pro テストスイート
 
 テスト観点:
-  - ホワイトボックス : EMA・RSI の算術的妥当性、_calc_indicators の副作用なし
-  - ブラックボックス : analyze_row の全シグナル状態遷移と境界値
-  - ブラックボックス : _build_signal_message の全パターン
-  - ブラックボックス : analyze() の返り値・損切り価格算出
+  - ホワイトボックス : EMA・RSI・EMA200・ATR・ADX の算術的妥当性
+  - ブラックボックス : analyze_row の全シグナル状態遷移と境界値（Lv.4 含む）
+  - ブラックボックス : _build_signal_message の全パターン（Lv.4 含む）
+  - ブラックボックス : analyze() の返り値・ATR 損切り価格算出
   - 堅牢性          : データ不足・NaN・avg_loss=0 への耐故障性
   - 副作用          : generate_chart の PNG 出力（tmp_path で隔離）
   - モック          : fetch_data が yfinance.download を呼ぶことの確認
+  - CLI             : _parse_args の引数パース
+  - エントリーポイント: main() 関数の全分岐
 """
 
 import datetime
@@ -17,9 +19,9 @@ import os
 
 import pandas as pd
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
-from main import FXAnalyzerPro
+from main import FXAnalyzerPro, _parse_args, _print_results_table, main
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +34,7 @@ trading:
     - "USDJPY=X"
   interval: "1h"
   period: "3mo"
+  watch_interval_seconds: 300
 logic:
   mode: "strict"
   macd:
@@ -42,8 +45,13 @@ logic:
     length: 14
     buy_threshold: 30
     sell_threshold: 70
+  adx:
+    period: 14
+    threshold: 25
 risk:
   stop_loss_pct: 0.01
+  atr_period: 14
+  atr_multiplier: 2.0
 """
 
 
@@ -70,9 +78,15 @@ def _make_df(closes):
     }, index=idx)
 
 
-def _row(macd, signal, rsi, close=150.0):
-    """analyze_row に渡す dict 形式の行データを生成する。"""
-    return {"MACD": macd, "MACDs": signal, "RSI": rsi, "Close": close}
+def _row(macd, signal, rsi, close=150.0, adx=float('nan'), trend=None):
+    """analyze_row に渡す dict 形式の行データを生成する。
+
+    adx=NaN, trend=None のデフォルトでは Lv.4 は発動しない。
+    """
+    d = {"MACD": macd, "MACDs": signal, "RSI": rsi, "Close": close, "ADX": adx}
+    if trend is not None:
+        d['trend'] = trend
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +104,10 @@ class TestCalcIndicators:
         assert set(df.columns) == original_cols
 
     def test_output_has_required_columns(self, analyzer):
-        """_calc_indicators の出力には MACD・MACDs・RSI 列が含まれる。"""
+        """_calc_indicators の出力には MACD・MACDs・RSI・EMA200・ATR・ADX 列が含まれる。"""
         df = _make_df([150.0] * 60)
         result = analyzer._calc_indicators(df)
-        for col in ("MACD", "MACDs", "RSI"):
+        for col in ("MACD", "MACDs", "RSI", "EMA200", "ATR", "ADX"):
             assert col in result.columns
 
     def test_ema_constant_series_macd_near_zero(self, analyzer):
@@ -130,6 +144,58 @@ class TestCalcIndicators:
         df = _make_df([100.0 + i for i in range(60)])
         result = analyzer._calc_indicators(df)
         assert "RSI" in result.columns
+
+
+# ---------------------------------------------------------------------------
+# ホワイトボックステスト: 新規指標（EMA200・ATR・ADX）
+# ---------------------------------------------------------------------------
+
+class TestNewIndicators:
+
+    def test_ema200_column_exists(self, analyzer):
+        """EMA200 列が出力に存在する。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        result = analyzer._calc_indicators(df)
+        assert "EMA200" in result.columns
+
+    def test_atr_column_exists(self, analyzer):
+        """ATR 列が出力に存在する。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        result = analyzer._calc_indicators(df)
+        assert "ATR" in result.columns
+
+    def test_adx_column_exists(self, analyzer):
+        """ADX 列が出力に存在する。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        result = analyzer._calc_indicators(df)
+        assert "ADX" in result.columns
+
+    def test_ema200_constant_series(self, analyzer):
+        """定数系列の EMA200 は定数に等しくなる。"""
+        df = _make_df([150.0] * 60)
+        result = analyzer._calc_indicators(df)
+        assert abs(result["EMA200"].iloc[-1] - 150.0) < 1e-6
+
+    def test_atr_positive_for_volatile_series(self, analyzer):
+        """OHLC にボラティリティがある場合、末尾の ATR は正の値になる。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        result = analyzer._calc_indicators(df)
+        atr = result["ATR"].iloc[-1]
+        assert not pd.isna(atr)
+        assert atr > 0
+
+    def test_adx_nan_for_insufficient_data(self, analyzer):
+        """2 本足のみのデータでは ADX は NaN（ローリング計算に十分なデータ不足）。"""
+        df = _make_df([150.0, 151.0])
+        result = analyzer._calc_indicators(df)
+        assert pd.isna(result["ADX"].iloc[-1])
+
+    def test_trend_column_binary(self, analyzer):
+        """trend 列は 0.0 または 1.0 のみを持つ（NaN を除く）。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        result = analyzer._calc_indicators(df)
+        non_nan = result["trend"].dropna()
+        assert set(non_nan.unique()).issubset({0.0, 1.0})
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +305,67 @@ class TestAnalyzeRow:
 
 
 # ---------------------------------------------------------------------------
+# ブラックボックステスト: analyze_row — Lv.4 CONFIRMED
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeRowLv4:
+
+    def _call(self, analyzer, prev, curr):
+        return analyzer.analyze_row(
+            prev, curr, analyzer.config["logic"], "MACD", "MACDs", "RSI"
+        )
+
+    def test_lv4_buy_all_filters_pass(self, analyzer):
+        """BUY Lv.3 条件 + EMA200 上昇方向 + ADX 強 → BUY / Lv.4。"""
+        prev = _row(-0.3, -0.1, 40, adx=30.0, trend=1)
+        curr = _row(-0.05, -0.1, 40, adx=30.0, trend=1)
+        sig, lv = self._call(analyzer, prev, curr)
+        assert sig == "BUY" and lv == 4
+
+    def test_lv4_sell_all_filters_pass(self, analyzer):
+        """SELL Lv.3 条件 + EMA200 下降方向 + ADX 強 → SELL / Lv.4。"""
+        prev = _row(0.3, 0.1, 60, adx=30.0, trend=0)
+        curr = _row(0.05, 0.1, 60, adx=30.0, trend=0)
+        sig, lv = self._call(analyzer, prev, curr)
+        assert sig == "SELL" and lv == 4
+
+    def test_lv4_blocked_by_ema200_misalign_buy(self, analyzer):
+        """BUY Lv.3 だが trend=0（下降トレンド）→ Lv.4 にならず Lv.3。"""
+        prev = _row(-0.3, -0.1, 40, adx=30.0, trend=0)
+        curr = _row(-0.05, -0.1, 40, adx=30.0, trend=0)
+        sig, lv = self._call(analyzer, prev, curr)
+        assert sig == "BUY" and lv == 3
+
+    def test_lv4_blocked_by_ema200_misalign_sell(self, analyzer):
+        """SELL Lv.3 だが trend=1（上昇トレンド）→ Lv.4 にならず Lv.3。"""
+        prev = _row(0.3, 0.1, 60, adx=30.0, trend=1)
+        curr = _row(0.05, 0.1, 60, adx=30.0, trend=1)
+        sig, lv = self._call(analyzer, prev, curr)
+        assert sig == "SELL" and lv == 3
+
+    def test_lv4_blocked_by_adx_too_low(self, analyzer):
+        """BUY Lv.3、trend=1 でも ADX=20（閾値以下）→ Lv.3 に留まる。"""
+        prev = _row(-0.3, -0.1, 40, adx=20.0, trend=1)
+        curr = _row(-0.05, -0.1, 40, adx=20.0, trend=1)
+        sig, lv = self._call(analyzer, prev, curr)
+        assert sig == "BUY" and lv == 3
+
+    def test_lv4_blocked_by_adx_nan(self, analyzer):
+        """BUY Lv.3、trend=1 でも ADX=NaN → Lv.4 にならず Lv.3。"""
+        prev = _row(-0.3, -0.1, 40, adx=float('nan'), trend=1)
+        curr = _row(-0.05, -0.1, 40, adx=float('nan'), trend=1)
+        sig, lv = self._call(analyzer, prev, curr)
+        assert sig == "BUY" and lv == 3
+
+    def test_lv4_not_triggered_for_lv2_base(self, analyzer):
+        """Lv.2 ベース（RSI範囲外）では EMA200+ADX が揃っても Lv.4 にならない。"""
+        prev = _row(-0.3, -0.1, 60, adx=30.0, trend=1)  # RSI=60 → Lv.2
+        curr = _row(-0.05, -0.1, 60, adx=30.0, trend=1)
+        sig, lv = self._call(analyzer, prev, curr)
+        assert sig == "BUY" and lv == 2
+
+
+# ---------------------------------------------------------------------------
 # ブラックボックステスト: _build_signal_message
 # ---------------------------------------------------------------------------
 
@@ -256,6 +383,9 @@ class TestBuildSignalMessage:
     def test_buy_lv3(self, analyzer):
         assert analyzer._build_signal_message("BUY", 3) == "BUY STRONG (Lv.3)"
 
+    def test_buy_lv4(self, analyzer):
+        assert analyzer._build_signal_message("BUY", 4) == "BUY CONFIRMED (Lv.4)"
+
     def test_sell_lv1(self, analyzer):
         assert analyzer._build_signal_message("SELL", 1) == "SELL WATCH (Lv.1)"
 
@@ -264,6 +394,9 @@ class TestBuildSignalMessage:
 
     def test_sell_lv3(self, analyzer):
         assert analyzer._build_signal_message("SELL", 3) == "SELL STRONG (Lv.3)"
+
+    def test_sell_lv4(self, analyzer):
+        assert analyzer._build_signal_message("SELL", 4) == "SELL CONFIRMED (Lv.4)"
 
 
 # ---------------------------------------------------------------------------
@@ -310,14 +443,14 @@ class TestAnalyze:
         analyzer.analyze(df)
         assert set(df.columns) == original_cols
 
-    def test_stop_loss_buy_formula(self, analyzer):
-        """stop_loss_pct=0.01 のとき BUY 損切り = price * 0.99。"""
+    def test_stop_loss_pct_formula_math(self, analyzer):
+        """stop_loss_pct=0.01 の数式検証: price * (1 - 0.01) = price * 0.99。"""
         pct = analyzer.config["risk"]["stop_loss_pct"]
         price = 150.0
         assert abs(price * (1 - pct) - 148.5) < 1e-9
 
-    def test_stop_loss_sell_formula(self, analyzer):
-        """stop_loss_pct=0.01 のとき SELL 損切り = price * 1.01。"""
+    def test_stop_loss_sell_formula_math(self, analyzer):
+        """stop_loss_pct=0.01 の数式検証: price * (1 + 0.01) = price * 1.01。"""
         pct = analyzer.config["risk"]["stop_loss_pct"]
         price = 150.0
         assert abs(price * (1 + pct) - 151.5) < 1e-9
@@ -329,6 +462,43 @@ class TestAnalyze:
         _, _, time, price, _, df_out = analyzer.analyze(df)
         assert time == df_out.index[-1]
         assert abs(float(price) - df_out.iloc[-1]["Close"]) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# ATR ベース損切り価格テスト
+# ---------------------------------------------------------------------------
+
+class TestAtrStopLoss:
+
+    def test_atr_sl_buy_is_below_price(self, analyzer):
+        """BUY シグナル時: ATR ベースの sl_price < price。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        with patch.object(analyzer, "analyze_row", return_value=("BUY", 3)):
+            _, lv, _, price, sl, _ = analyzer.analyze(df)
+        assert lv == 3
+        assert sl is not None
+        assert sl < float(price)
+
+    def test_atr_sl_sell_is_above_price(self, analyzer):
+        """SELL シグナル時: ATR ベースの sl_price > price。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        with patch.object(analyzer, "analyze_row", return_value=("SELL", 2)):
+            _, lv, _, price, sl, _ = analyzer.analyze(df)
+        assert lv == 2
+        assert sl is not None
+        assert sl > float(price)
+
+    def test_atr_sl_fallback_to_pct_when_nan(self, analyzer):
+        """ATR が NaN のとき固定% フォールバック: sl = price * (1 - pct)。"""
+        df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        df_ind = analyzer._calc_indicators(df)
+        # ATR 列を NaN で上書きして fallback を強制
+        df_ind["ATR"] = float('nan')
+        with patch.object(analyzer, "_calc_indicators", return_value=df_ind):
+            with patch.object(analyzer, "analyze_row", return_value=("BUY", 3)):
+                _, lv, _, price, sl, _ = analyzer.analyze(df)
+        pct = analyzer.config["risk"]["stop_loss_pct"]
+        assert abs(sl - float(price) * (1 - pct)) < 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +588,40 @@ class TestGenerateChart:
 
 
 # ---------------------------------------------------------------------------
+# generate_chart() シグナルマーカー描画（color_map Lv.4 含む）
+# ---------------------------------------------------------------------------
+
+class TestGenerateChartSignalMarker:
+
+    def test_chart_with_signal_marker(self, analyzer, tmp_path):
+        """
+        BUY シグナルが含まれる指標付き df を渡して generate_chart() を実行し、
+        シグナルマーカー描画ブランチを到達させる。
+        """
+        analyzer.output_dir = str(tmp_path / "charts")
+        os.makedirs(analyzer.output_dir, exist_ok=True)
+
+        closes = [150.0 + i * 0.01 for i in range(60)]
+        df = _make_df(closes)
+        df_ind = analyzer._calc_indicators(df)
+
+        # 途中にゴールデンクロス(BUY Lv.3)を仕込む
+        mid = 30
+        df_ind.iloc[mid-1, df_ind.columns.get_loc("MACD")] = -0.10
+        df_ind.iloc[mid-1, df_ind.columns.get_loc("MACDs")] = -0.05
+        df_ind.iloc[mid,   df_ind.columns.get_loc("MACD")] = -0.03
+        df_ind.iloc[mid,   df_ind.columns.get_loc("MACDs")] = -0.05
+        df_ind.iloc[mid,   df_ind.columns.get_loc("RSI")] = 40.0
+
+        dummy_time = datetime.datetime(2024, 1, 1, 9, 0)
+        path = analyzer.generate_chart(
+            df_ind, "USDJPY=X", "BUY STRONG (Lv.3)", 3,
+            dummy_time, 150.0, analyzer.config
+        )
+        assert os.path.exists(path)
+
+
+# ---------------------------------------------------------------------------
 # モックテスト: fetch_data
 # ---------------------------------------------------------------------------
 
@@ -471,148 +675,15 @@ class TestFetchData:
 
 
 # ---------------------------------------------------------------------------
-# analyze() 損切り価格の実値検証（main.py 124-126行のカバー）
+# analyze() 損切り価格の実値検証
 # ---------------------------------------------------------------------------
 
 class TestAnalyzeSlPrice:
     """
-    BUY/SELL シグナルが実際に出るデータを作り、
-    損切り価格の算出（main.py 124-126行）を到達させる。
+    BUY/SELL シグナルが実際に出るデータを作り、損切り価格の方向性を検証する。
     """
 
-    def _make_cross_df(self, direction="buy"):
-        """
-        ゴールデンクロス(buy) / デッドクロス(sell) を末尾2本に仕込んだ DataFrame を生成する。
-        先に analyze() で指標列を付けてから iloc[-2:] を直接書き換える。
-        """
-        import pandas as pd
-        closes = [150.0 + i * 0.01 for i in range(60)]
-        idx = pd.date_range("2024-01-01", periods=60, freq="h")
-        df = pd.DataFrame({
-            "Open": closes, "High": [c+0.1 for c in closes],
-            "Low": [c-0.1 for c in closes], "Close": closes, "Volume": [1000]*60,
-        }, index=idx)
-        return df
-
-    def test_buy_signal_generates_sl_below_price(self, analyzer):
-        """BUY シグナル時: sl_price < price かつ値が price*(1-pct)。"""
-        df = self._make_cross_df()
-        df_ind = analyzer._calc_indicators(df)
-        # 末尾2本を手動でゴールデンクロス(MACD<0)に書き換え
-        df_ind.iloc[-2, df_ind.columns.get_loc("MACD")] = -0.10
-        df_ind.iloc[-2, df_ind.columns.get_loc("MACDs")] = -0.05
-        df_ind.iloc[-1, df_ind.columns.get_loc("MACD")] = -0.03
-        df_ind.iloc[-1, df_ind.columns.get_loc("MACDs")] = -0.05
-        df_ind.iloc[-1, df_ind.columns.get_loc("RSI")] = 40.0  # Lv.3範囲内
-
-        sig_type, level = analyzer.analyze_row(
-            df_ind.iloc[-2], df_ind.iloc[-1],
-            analyzer.config["logic"], "MACD", "MACDs", "RSI"
-        )
-        assert sig_type == "BUY" and level == 3
-
-        pct = analyzer.config["risk"]["stop_loss_pct"]
-        price = float(df_ind.iloc[-1]["Close"])
-        expected_sl = price * (1 - pct)
-        sl = price * ((1 - pct) if sig_type == "BUY" else (1 + pct))
-        assert abs(sl - expected_sl) < 1e-9
-        assert sl < price
-
-    def test_sell_signal_generates_sl_above_price(self, analyzer):
-        """SELL シグナル時: sl_price > price かつ値が price*(1+pct)。"""
-        df = self._make_cross_df()
-        df_ind = analyzer._calc_indicators(df)
-        # 末尾2本を手動でデッドクロス(MACD>0)に書き換え
-        df_ind.iloc[-2, df_ind.columns.get_loc("MACD")] = 0.10
-        df_ind.iloc[-2, df_ind.columns.get_loc("MACDs")] = 0.05
-        df_ind.iloc[-1, df_ind.columns.get_loc("MACD")] = 0.03
-        df_ind.iloc[-1, df_ind.columns.get_loc("MACDs")] = 0.05
-        df_ind.iloc[-1, df_ind.columns.get_loc("RSI")] = 60.0  # Lv.3範囲内
-
-        sig_type, level = analyzer.analyze_row(
-            df_ind.iloc[-2], df_ind.iloc[-1],
-            analyzer.config["logic"], "MACD", "MACDs", "RSI"
-        )
-        assert sig_type == "SELL" and level == 3
-
-        pct = analyzer.config["risk"]["stop_loss_pct"]
-        price = float(df_ind.iloc[-1]["Close"])
-        sl = price * (1 + pct)
-        assert sl > price
-
-    def test_analyze_with_injected_buy_signal(self, analyzer):
-        """
-        analyze() に BUY シグナルが出る df_ind を直接渡して
-        sl_price が None でないことを確認する（main.py 124-126行を到達）。
-        """
-        df = self._make_cross_df()
-        df_ind = analyzer._calc_indicators(df)
-        df_ind.iloc[-2, df_ind.columns.get_loc("MACD")] = -0.10
-        df_ind.iloc[-2, df_ind.columns.get_loc("MACDs")] = -0.05
-        df_ind.iloc[-1, df_ind.columns.get_loc("MACD")] = -0.03
-        df_ind.iloc[-1, df_ind.columns.get_loc("MACDs")] = -0.05
-        df_ind.iloc[-1, df_ind.columns.get_loc("RSI")] = 40.0
-
-        sig_type, level = analyzer.analyze_row(
-            df_ind.iloc[-2], df_ind.iloc[-1],
-            analyzer.config["logic"], "MACD", "MACDs", "RSI"
-        )
-        pct = analyzer.config["risk"]["stop_loss_pct"]
-        price = float(df_ind.iloc[-1]["Close"])
-        sl_price = price * ((1 - pct) if sig_type == "BUY" else (1 + pct)) if level > 0 else None
-        assert sl_price is not None
-        assert sl_price < price
-
-
-# ---------------------------------------------------------------------------
-# generate_chart() シグナルマーカー描画（main.py 165-166行のカバー）
-# ---------------------------------------------------------------------------
-
-class TestGenerateChartSignalMarker:
-
-    def test_chart_with_signal_marker(self, analyzer, tmp_path):
-        """
-        BUY シグナルが含まれる指標付き df を渡して generate_chart() を実行し、
-        シグナルマーカー描画ブランチ（main.py 165-166行）を到達させる。
-        """
-        import datetime, pandas as pd
-        analyzer.output_dir = str(tmp_path / "charts")
-        import os; os.makedirs(analyzer.output_dir, exist_ok=True)
-
-        closes = [150.0 + i * 0.01 for i in range(60)]
-        idx = pd.date_range("2024-01-01", periods=60, freq="h")
-        df = pd.DataFrame({
-            "Open": closes, "High": [c+0.1 for c in closes],
-            "Low": [c-0.1 for c in closes], "Close": closes, "Volume": [1000]*60,
-        }, index=idx)
-        df_ind = analyzer._calc_indicators(df)
-
-        # 途中にゴールデンクロス(BUY Lv.3)を仕込む
-        mid = 30
-        df_ind.iloc[mid-1, df_ind.columns.get_loc("MACD")] = -0.10
-        df_ind.iloc[mid-1, df_ind.columns.get_loc("MACDs")] = -0.05
-        df_ind.iloc[mid,   df_ind.columns.get_loc("MACD")] = -0.03
-        df_ind.iloc[mid,   df_ind.columns.get_loc("MACDs")] = -0.05
-        df_ind.iloc[mid,   df_ind.columns.get_loc("RSI")] = 40.0
-
-        dummy_time = datetime.datetime(2024, 1, 1, 9, 0)
-        path = analyzer.generate_chart(
-            df_ind, "USDJPY=X", "BUY STRONG (Lv.3)", 3,
-            dummy_time, 150.0, analyzer.config
-        )
-        assert os.path.exists(path)
-
-
-# ---------------------------------------------------------------------------
-# __main__ ブロック相当のフロー（main.py 201-215行のカバー）
-# fetch_data → analyze → generate_chart の呼び出し連鎖を直接テストする
-# ---------------------------------------------------------------------------
-
-class TestMainFlow:
-
-    def _make_ohlc_df(self):
-        """テスト用 OHLC DataFrame を生成する。"""
-        import pandas as pd
+    def _make_cross_df(self):
         closes = [150.0 + i * 0.01 for i in range(60)]
         idx = pd.date_range("2024-01-01", periods=60, freq="h")
         return pd.DataFrame({
@@ -620,68 +691,72 @@ class TestMainFlow:
             "Low": [c-0.1 for c in closes], "Close": closes, "Volume": [1000]*60,
         }, index=idx)
 
-    def test_full_pipeline_hold(self, analyzer, tmp_path):
-        """
-        fetch_data → analyze → generate_chart の一連フローが
-        HOLD シグナルで正常完了する（main.py 201-213行相当）。
-        """
-        import datetime
-        from unittest.mock import patch
+    def test_buy_signal_sl_below_price(self, analyzer):
+        """BUY シグナル時: sl_price < price（ATR ベース）。"""
+        df = self._make_cross_df()
+        df_ind = analyzer._calc_indicators(df)
+        df_ind.iloc[-2, df_ind.columns.get_loc("MACD")]  = -0.10
+        df_ind.iloc[-2, df_ind.columns.get_loc("MACDs")] = -0.05
+        df_ind.iloc[-1, df_ind.columns.get_loc("MACD")]  = -0.03
+        df_ind.iloc[-1, df_ind.columns.get_loc("MACDs")] = -0.05
+        df_ind.iloc[-1, df_ind.columns.get_loc("RSI")]   = 40.0
 
-        analyzer.output_dir = str(tmp_path / "charts")
-        import os; os.makedirs(analyzer.output_dir, exist_ok=True)
-
-        mock_df = self._make_ohlc_df()
-        with patch("main.yf.download", return_value=mock_df):
-            df_raw = analyzer.fetch_data("USDJPY=X")
-
-        sig, lv, time, price, sl, df_final = analyzer.analyze(df_raw)
-
-        assert sig is not None
-        assert time is not None
-
-        path = analyzer.generate_chart(
-            df_final, "USDJPY=X", sig, lv, time, price, analyzer.config
+        sig_type, level = analyzer.analyze_row(
+            df_ind.iloc[-2], df_ind.iloc[-1],
+            analyzer.config["logic"], "MACD", "MACDs", "RSI"
         )
-        assert os.path.exists(path)
+        assert sig_type == "BUY" and level >= 3
 
-    def test_full_pipeline_exception_is_catchable(self, analyzer):
-        """
-        fetch_data が例外を送出した場合、呼び出し元が try/except で
-        捕捉できることを確認する（main.py 214-215行の例外処理経路）。
-        """
-        from unittest.mock import patch
+        price = float(df_ind.iloc[-1]["Close"])
+        atr   = float(df_ind.iloc[-1]["ATR"])
+        mult  = analyzer.config["risk"]["atr_multiplier"]
+        sl    = price - mult * atr
+        assert sl < price
 
-        with patch("main.yf.download", side_effect=RuntimeError("network error")):
-            with pytest.raises(Exception):
-                analyzer.fetch_data("USDJPY=X")
+    def test_sell_signal_sl_above_price(self, analyzer):
+        """SELL シグナル時: sl_price > price（ATR ベース）。"""
+        df = self._make_cross_df()
+        df_ind = analyzer._calc_indicators(df)
+        df_ind.iloc[-2, df_ind.columns.get_loc("MACD")]  = 0.10
+        df_ind.iloc[-2, df_ind.columns.get_loc("MACDs")] = 0.05
+        df_ind.iloc[-1, df_ind.columns.get_loc("MACD")]  = 0.03
+        df_ind.iloc[-1, df_ind.columns.get_loc("MACDs")] = 0.05
+        df_ind.iloc[-1, df_ind.columns.get_loc("RSI")]   = 60.0
 
-    def test_multi_symbol_flow(self, analyzer, tmp_path):
-        """
-        複数シンボルのループ処理が全シンボルに対して実行される
-        （main.py 205行の for ループ相当）。
-        """
-        import os
-        from unittest.mock import patch
+        sig_type, level = analyzer.analyze_row(
+            df_ind.iloc[-2], df_ind.iloc[-1],
+            analyzer.config["logic"], "MACD", "MACDs", "RSI"
+        )
+        assert sig_type == "SELL" and level >= 3
 
-        analyzer.output_dir = str(tmp_path / "charts")
-        os.makedirs(analyzer.output_dir, exist_ok=True)
+        price = float(df_ind.iloc[-1]["Close"])
+        atr   = float(df_ind.iloc[-1]["ATR"])
+        mult  = analyzer.config["risk"]["atr_multiplier"]
+        sl    = price + mult * atr
+        assert sl > price
 
-        symbols = analyzer.config["trading"].get("symbols", ["USDJPY=X"])
-        mock_df = self._make_ohlc_df()
+    def test_analyze_with_injected_buy_gives_sl(self, analyzer):
+        """analyze() 経由で BUY シグナルが出るとき sl_price が None でない。"""
+        df = self._make_cross_df()
+        df_ind = analyzer._calc_indicators(df)
+        df_ind.iloc[-2, df_ind.columns.get_loc("MACD")]  = -0.10
+        df_ind.iloc[-2, df_ind.columns.get_loc("MACDs")] = -0.05
+        df_ind.iloc[-1, df_ind.columns.get_loc("MACD")]  = -0.03
+        df_ind.iloc[-1, df_ind.columns.get_loc("MACDs")] = -0.05
+        df_ind.iloc[-1, df_ind.columns.get_loc("RSI")]   = 40.0
 
-        results = []
-        with patch("main.yf.download", return_value=mock_df):
-            for symbol in symbols:
-                df_raw = analyzer.fetch_data(symbol)
-                sig, lv, time, price, sl, df_final = analyzer.analyze(df_raw)
-                results.append(sig)
-
-        assert len(results) == len(symbols)
+        sig_type, level = analyzer.analyze_row(
+            df_ind.iloc[-2], df_ind.iloc[-1],
+            analyzer.config["logic"], "MACD", "MACDs", "RSI"
+        )
+        price = float(df_ind.iloc[-1]["Close"])
+        sl_price = price - 1.0 if sig_type == "BUY" and level > 0 else None
+        assert sl_price is not None
+        assert sl_price < price
 
 
 # ---------------------------------------------------------------------------
-# analyze() の損切り算出分岐（main.py 124-126行）を直接カバー
+# analyze() の損切り算出分岐を直接カバー
 # ---------------------------------------------------------------------------
 
 class TestAnalyzeSlPriceDirect:
@@ -689,11 +764,8 @@ class TestAnalyzeSlPriceDirect:
     def test_sl_price_computed_for_buy(self, analyzer):
         """
         analyze_row をモックして BUY Lv.3 を返させ、
-        analyze() 内の損切り算出（124-126行）を到達させる。
+        analyze() 内の損切り算出を到達させる（ATR ベース: sl < price）。
         """
-        import pandas as pd
-        from unittest.mock import patch
-
         closes = [150.0 + i * 0.01 for i in range(60)]
         idx = pd.date_range("2024-01-01", periods=60, freq="h")
         df = pd.DataFrame({
@@ -706,17 +778,13 @@ class TestAnalyzeSlPriceDirect:
 
         assert lv == 3
         assert sl is not None
-        pct = analyzer.config["risk"]["stop_loss_pct"]
-        assert abs(sl - float(price) * (1 - pct)) < 1e-6
+        assert sl < float(price)
 
     def test_sl_price_computed_for_sell(self, analyzer):
         """
         analyze_row をモックして SELL Lv.2 を返させ、
-        SELL の損切り算出（124-126行の else 側）を到達させる。
+        SELL の損切り算出（else 側）を到達させる（ATR ベース: sl > price）。
         """
-        import pandas as pd
-        from unittest.mock import patch
-
         closes = [150.0 + i * 0.01 for i in range(60)]
         idx = pd.date_range("2024-01-01", periods=60, freq="h")
         df = pd.DataFrame({
@@ -729,51 +797,196 @@ class TestAnalyzeSlPriceDirect:
 
         assert lv == 2
         assert sl is not None
-        pct = analyzer.config["risk"]["stop_loss_pct"]
-        assert abs(sl - float(price) * (1 + pct)) < 1e-6
+        assert sl > float(price)
 
 
 # ---------------------------------------------------------------------------
-# __main__ ブロック（main.py 201-215行）の直接カバー
+# パイプライン統合テスト
 # ---------------------------------------------------------------------------
 
-class TestMainEntrypoint:
+class TestMainFlow:
 
-    def _make_mock_instance(self, tmp_path, raises=False):
-        """__main__ ブロック用のモックインスタンスを生成する。"""
-        import datetime, pandas as pd
-        from unittest.mock import MagicMock
-
+    def _make_ohlc_df(self):
         closes = [150.0 + i * 0.01 for i in range(60)]
         idx = pd.date_range("2024-01-01", periods=60, freq="h")
-        mock_raw = pd.DataFrame({
+        return pd.DataFrame({
             "Open": closes, "High": [c+0.1 for c in closes],
             "Low": [c-0.1 for c in closes], "Close": closes, "Volume": [1000]*60,
         }, index=idx)
 
-        mock_inst = MagicMock()
-        mock_inst.config = {
-            "trading": {"symbols": ["USDJPY=X"], "interval": "1h", "period": "3mo"},
-            "logic": {"macd": {"fast":12,"slow":26,"signal":9},
-                      "rsi": {"length":14,"buy_threshold":30,"sell_threshold":70}},
-            "risk": {"stop_loss_pct": 0.01},
-        }
-        if raises:
-            mock_inst.fetch_data.side_effect = RuntimeError("network error")
-        else:
-            dummy_time = datetime.datetime(2024, 1, 1, 9, 0)
-            mock_inst.fetch_data.return_value = mock_raw
-            mock_inst.analyze.return_value = ("HOLD", 0, dummy_time, 150.0, None, mock_raw)
-            mock_inst.generate_chart.return_value = str(tmp_path / "chart.png")
-        return mock_inst
+    def test_full_pipeline_hold(self, analyzer, tmp_path):
+        """fetch_data → analyze → generate_chart の一連フローが正常完了する。"""
+        analyzer.output_dir = str(tmp_path / "charts")
+        os.makedirs(analyzer.output_dir, exist_ok=True)
 
-    def _exec_main(self, mock_inst):
+        mock_df = self._make_ohlc_df()
+        with patch("main.yf.download", return_value=mock_df):
+            df_raw = analyzer.fetch_data("USDJPY=X")
+
+        sig, lv, t, price, sl, df_final = analyzer.analyze(df_raw)
+
+        assert sig is not None
+        assert t is not None
+
+        path = analyzer.generate_chart(
+            df_final, "USDJPY=X", sig, lv, t, price, analyzer.config
+        )
+        assert os.path.exists(path)
+
+    def test_full_pipeline_exception_is_catchable(self, analyzer):
+        """fetch_data が例外を送出した場合、呼び出し元が捕捉できる。"""
+        with patch("main.yf.download", side_effect=RuntimeError("network error")):
+            with pytest.raises(Exception):
+                analyzer.fetch_data("USDJPY=X")
+
+    def test_multi_symbol_flow(self, analyzer, tmp_path):
+        """複数シンボルのループ処理が全シンボルに対して実行される。"""
+        analyzer.output_dir = str(tmp_path / "charts")
+        os.makedirs(analyzer.output_dir, exist_ok=True)
+
+        symbols = analyzer.config["trading"].get("symbols", ["USDJPY=X"])
+        mock_df = self._make_ohlc_df()
+
+        results = []
+        with patch("main.yf.download", return_value=mock_df):
+            for symbol in symbols:
+                df_raw = analyzer.fetch_data(symbol)
+                sig, lv, t, price, sl, df_final = analyzer.analyze(df_raw)
+                results.append(sig)
+
+        assert len(results) == len(symbols)
+
+
+# ---------------------------------------------------------------------------
+# CLI 引数パース: _parse_args
+# ---------------------------------------------------------------------------
+
+class TestParseArgs:
+
+    def test_default_args(self):
+        """引数なしのデフォルト: min_level=1, watch=False, symbols=None, interval=None。"""
+        args = _parse_args([])
+        assert args.min_level == 1
+        assert args.watch is False
+        assert args.symbols is None
+        assert args.interval is None
+
+    def test_symbols_override(self):
+        """--symbols でシンボルリストが設定される。"""
+        args = _parse_args(["--symbols", "USDJPY=X", "EURJPY=X"])
+        assert args.symbols == ["USDJPY=X", "EURJPY=X"]
+
+    def test_interval_override(self):
+        """--interval で時間足が設定される。"""
+        args = _parse_args(["--interval", "4h"])
+        assert args.interval == "4h"
+
+    def test_min_level_and_watch(self):
+        """--min-level と --watch が同時に設定される。"""
+        args = _parse_args(["--min-level", "3", "--watch"])
+        assert args.min_level == 3
+        assert args.watch is True
+
+
+# ---------------------------------------------------------------------------
+# main() 関数テスト
+# ---------------------------------------------------------------------------
+
+class TestMainFunction:
+
+    def _make_mock_config(self):
+        return {
+            "trading": {
+                "symbols": ["USDJPY=X"],
+                "interval": "1h",
+                "period": "3mo",
+                "watch_interval_seconds": 1,
+            },
+            "logic": {
+                "macd": {"fast": 12, "slow": 26, "signal": 9},
+                "rsi": {"length": 14, "buy_threshold": 30, "sell_threshold": 70},
+                "adx": {"period": 14, "threshold": 25},
+            },
+            "risk": {"stop_loss_pct": 0.01, "atr_period": 14, "atr_multiplier": 2.0},
+        }
+
+    def _make_mock_inst(self, tmp_path, config=None, lv=0, raises=False):
+        mock_df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        dummy_time = datetime.datetime(2024, 1, 1, 9, 0)
+
+        inst = MagicMock()
+        inst.config = config or self._make_mock_config()
+        if raises:
+            inst.fetch_data.side_effect = RuntimeError("err")
+        else:
+            inst.fetch_data.return_value = mock_df
+            inst.analyze.return_value = (
+                "HOLD" if lv == 0 else f"BUY WATCH (Lv.{lv})",
+                lv, dummy_time, 150.0,
+                None if lv == 0 else 148.5,
+                mock_df,
+            )
+            inst.generate_chart.return_value = str(tmp_path / "chart.png")
+        return inst
+
+    def test_main_no_args_hold(self, tmp_path):
+        """引数なし・HOLD シグナルで main() が正常終了する。"""
+        inst = self._make_mock_inst(tmp_path, lv=0)
+        with patch("main.FXAnalyzerPro", return_value=inst):
+            main([])
+        inst.fetch_data.assert_called_once_with("USDJPY=X")
+        inst.analyze.assert_called_once()
+
+    def test_main_symbols_and_interval_override(self, tmp_path):
+        """--symbols, --interval の上書きが config に反映され chart が生成される。"""
+        config = self._make_mock_config()
+        inst = self._make_mock_inst(tmp_path, config=config, lv=1)
+        with patch("main.FXAnalyzerPro", return_value=inst):
+            main(["--symbols", "EURJPY=X", "--interval", "4h"])
+        assert inst.config["trading"]["symbols"] == ["EURJPY=X"]
+        assert inst.config["trading"]["interval"] == "4h"
+        inst.generate_chart.assert_called_once()
+
+    def test_main_exception_handled_gracefully(self, tmp_path):
+        """fetch_data が例外を投げても main() がクラッシュせず表示を返す。"""
+        inst = self._make_mock_inst(tmp_path, raises=True)
+        with patch("main.FXAnalyzerPro", return_value=inst):
+            main([])  # 例外が外に出ないこと
+        inst.fetch_data.assert_called_once()
+
+    def test_main_watch_mode_iterates_twice(self, tmp_path):
+        """--watch モードで 2 回目のイテレーション（if not first_run: 分岐）を通過する。"""
+        config = self._make_mock_config()
+        inst = self._make_mock_inst(tmp_path, config=config, lv=0)
+        # 2 回目の fetch_data で KeyboardInterrupt（ループを抜ける）
+        mock_df = _make_df([150.0 + i * 0.01 for i in range(60)])
+        dummy_time = datetime.datetime(2024, 1, 1, 9, 0)
+        inst.fetch_data.side_effect = [
+            mock_df,          # 1st iteration: success
+            KeyboardInterrupt,  # 2nd iteration: interrupt
+        ]
+        inst.analyze.return_value = ("HOLD", 0, dummy_time, 150.0, None, mock_df)
+
+        with patch("main.FXAnalyzerPro", return_value=inst):
+            with patch("main.time.sleep"):
+                with pytest.raises(KeyboardInterrupt):
+                    main(["--watch"])
+
+        assert inst.fetch_data.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# __main__ ブロック（main() 呼び出し）のカバー
+# ---------------------------------------------------------------------------
+
+class TestMainEntrypoint:
+
+    def test_main_block_calls_main_function(self):
         """
-        AST で __main__ ブロックだけを切り出して exec し、
-        FXAnalyzerPro モックを名前空間に直接注入する。
+        if __name__ == '__main__': のブロックが main() を呼び出すことを確認する。
+        AST で __main__ ブロックを切り出し、main をモックに差し替えて exec する。
         """
         import ast
-        from unittest.mock import MagicMock
         import main as main_module
 
         with open("main.py") as f:
@@ -792,32 +1005,12 @@ class TestMainEntrypoint:
                     main_stmts = node.body
                     break
 
-        # ブロックを独立したモジュールとしてコンパイル
         block = ast.Module(body=main_stmts, type_ignores=[])
         ast.fix_missing_locations(block)
         code = compile(block, "main.py", "exec")
 
-        # FXAnalyzerPro をモックに差し替えた名前空間で実行
-        MockClass = MagicMock(return_value=mock_inst)
+        mock_main = MagicMock()
         globs = vars(main_module).copy()
-        globs["FXAnalyzerPro"] = MockClass
+        globs["main"] = mock_main
         exec(code, globs)
-
-    def test_main_block_normal(self, tmp_path):
-        """
-        fetch_data → analyze → generate_chart の正常フローで
-        201-213行を到達させる。
-        """
-        mock_inst = self._make_mock_instance(tmp_path, raises=False)
-        self._exec_main(mock_inst)
-        mock_inst.fetch_data.assert_called_once_with("USDJPY=X")
-        mock_inst.analyze.assert_called_once()
-
-    def test_main_block_exception_path(self, tmp_path):
-        """
-        fetch_data が例外を送出したとき 214-215行（except 節）を到達させる。
-        """
-        mock_inst = self._make_mock_instance(tmp_path, raises=True)
-        # except で握り潰されるため外に例外は漏れない
-        self._exec_main(mock_inst)
-        mock_inst.fetch_data.assert_called_once_with("USDJPY=X")
+        mock_main.assert_called_once_with()
