@@ -1,6 +1,8 @@
 import argparse
+import json
 import os
 import time
+import urllib.request
 
 import matplotlib
 # GitHub Actions等のGUIがない環境でも動作するようにバックエンドをAggに設定
@@ -64,6 +66,21 @@ def _print_results_table(results: list, title: str = "FX-Compass Pro — Signal 
         table.add_row(r["symbol"], r["signal"], lv_str, price_str, sl_str, time_str, style=style)
 
     console.print(table)
+
+
+def _notify_discord(message: str, webhook_url: str) -> None:
+    """Discord Webhook でメッセージを送信する。失敗してもスキャンは継続する。"""
+    req = urllib.request.Request(
+        webhook_url,
+        data=json.dumps({"content": message}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as _:
+            pass
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------
@@ -357,6 +374,17 @@ def main(argv=None):
                 })
 
         _print_results_table(results)
+
+        webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+        if webhook_url:
+            notify_targets = [r for r in results if r["level"] >= min_level and r["level"] > 0]
+            if notify_targets:
+                lines = ["**[FX-Compass]**"]
+                for r in notify_targets:
+                    sl_str = f"{r['sl_price']:.3f}" if r["sl_price"] else "—"
+                    lines.append(f"{r['symbol']}: {r['signal']} @ {r['price']:.3f} SL:{sl_str}")
+                _notify_discord("\n".join(lines), webhook_url)
+
         first_run = False
 
         if not args.watch:

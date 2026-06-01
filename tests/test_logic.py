@@ -21,7 +21,7 @@ import pandas as pd
 import pytest
 from unittest.mock import patch, MagicMock
 
-from main import FXAnalyzerPro, _parse_args, _print_results_table, main
+from main import FXAnalyzerPro, _parse_args, _print_results_table, _notify_discord, main
 
 
 # ---------------------------------------------------------------------------
@@ -979,6 +979,53 @@ class TestMainFunction:
                     main(["--watch"])
 
         assert inst.fetch_data.call_count == 2
+
+    def test_discord_notify_called_when_signal(self, tmp_path):
+        """DISCORD_WEBHOOK_URL 設定 + シグナルあり時に _notify_discord が呼ばれること。"""
+        config = self._make_mock_config()
+        inst = self._make_mock_inst(tmp_path, config=config, lv=2)
+        webhook = "https://discord.com/api/webhooks/123/abc"
+        with patch("main.FXAnalyzerPro", return_value=inst):
+            with patch("main._notify_discord") as mock_notify:
+                with patch.dict(os.environ, {"DISCORD_WEBHOOK_URL": webhook}):
+                    main([])
+        mock_notify.assert_called_once()
+
+    def test_discord_notify_skipped_without_url(self, tmp_path):
+        """DISCORD_WEBHOOK_URL 未設定時は _notify_discord が呼ばれない。"""
+        config = self._make_mock_config()
+        inst = self._make_mock_inst(tmp_path, config=config, lv=2)
+        env_without_url = {k: v for k, v in os.environ.items() if k != "DISCORD_WEBHOOK_URL"}
+        with patch("main.FXAnalyzerPro", return_value=inst):
+            with patch("main._notify_discord") as mock_notify:
+                with patch.dict(os.environ, env_without_url, clear=True):
+                    main([])
+        mock_notify.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# LINE Notify 関数テスト
+# ---------------------------------------------------------------------------
+
+class TestNotifyDiscord:
+
+    def test_sends_post_request(self):
+        """urlopen が Discord Webhook URL と Content-Type ヘッダーで呼ばれること。"""
+        webhook = "https://discord.com/api/webhooks/123/abc"
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=MagicMock())
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_cm) as mock_urlopen:
+            _notify_discord("test message", webhook)
+        mock_urlopen.assert_called_once()
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == webhook
+        assert req.get_header("Content-type") == "application/json"
+
+    def test_exception_does_not_crash(self):
+        """urllib エラー時にクラッシュしない。"""
+        with patch("urllib.request.urlopen", side_effect=Exception("network error")):
+            _notify_discord("test", "https://discord.com/api/webhooks/x/y")  # 例外が外に出ないこと
 
 
 # ---------------------------------------------------------------------------

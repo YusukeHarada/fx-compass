@@ -1,0 +1,19 @@
+name: FX Signal Scan
+
+on:
+  schedule:
+    - cron: "0 * * * 1-5"  # 平日の毎時0分 UTC（日本時間 9〜翌9時）
+  workflow_dispatch:         # GitHub Actions UI から手動実行も可能
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - run: python main.py --min-level 2
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

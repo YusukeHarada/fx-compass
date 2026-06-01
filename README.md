@@ -66,6 +66,41 @@ python main.py --watch
 pytest tests/ --cov=main --cov-report=term-missing
 ```
 
+### 6. スマホ通知（Discord）のセットアップ
+
+GitHub Actions の cron を使い、シグナル発生時に Discord チャンネルへ通知します。スマホに Discord アプリを入れておけばプッシュ通知が届きます。
+
+**Step 1 — Discord Webhook URL を取得**
+
+1. Discord で通知を受け取りたいチャンネルを開く
+2. チャンネル設定（歯車アイコン）→ **連携サービス** → **ウェブフック** → **新しいウェブフック**
+3. 「ウェブフック URL をコピー」でコピー
+
+**Step 2 — GitHub Secret に登録**
+
+リポジトリの **Settings → Secrets and variables → Actions → New repository secret** で以下を追加します。
+
+| Name | Value |
+|------|-------|
+| `DISCORD_WEBHOOK_URL` | コピーした Webhook URL |
+
+**Step 3 — Actions が自動実行される**
+
+[.github/workflows/notify.yml](.github/workflows/notify.yml) が平日の毎時 0 分（UTC）に自動でスキャンを実行し、Lv.2 以上のシグナルが出たときのみ Discord へ通知します。
+
+```
+**[FX-Compass]**
+USDJPY=X: BUY CONFIRMED (Lv.4) @ 157.230 SL:155.180
+```
+
+**ローカルでの手動確認**
+
+```bash
+DISCORD_WEBHOOK_URL=<your_webhook_url> python main.py --min-level 1
+```
+
+> **コスト:** 平日毎時実行 = 月 約480分 < GitHub Actions 無料枠 2,000分。Discord も無料。
+
 ### 3. CLI オプション一覧
 
 | オプション | 説明 | 例 |
@@ -104,7 +139,7 @@ pytest tests/ --cov=main --cov-report=term-missing
 | `risk.atr_period` | ATR 計算期間 | `14` |
 | `risk.atr_multiplier` | 損切り幅の ATR 倍率（`価格 ± ATR × multiplier`） | `2.0` |
 
-### 6. 設計上の制約・既知の限界
+### 7. 設計上の制約・既知の限界
 
 * **利確ロジックは持たない** — Stop Loss のみ定義。利確タイミングは利用者が判断する。
 * **直近 2 本のみで判定** — クロス検出は最新ローソク足 2 本のみ参照する。
@@ -201,12 +236,13 @@ ATR が NaN（データ不足）の場合（フォールバック）:
 | `TestParseArgs` | CLI | `--symbols` / `--interval` / `--min-level` / `--watch` |
 | `TestMainFunction` | CLI | `main()` の全分岐（通常・シンボル上書き・例外・watch） |
 | `TestMainEntrypoint` | エントリー | `__main__` ブロックが `main()` を呼び出すことの確認 |
+| `TestNotifyDiscord` | Discord 通知 | POST リクエスト送信・ネットワークエラー時のクラッシュ回避 |
 
 #### 3.2 テストカバレッジ
 
 `pytest-cov` による動的解析で `main.py` の C0（命令網羅）100% を維持しています。
 
-* **現状**: `main.py` 100% 達成（**89 テストケース**）
+* **現状**: `main.py` 100% 達成（**94 テストケース**）
 
 ```bash
 pytest tests/ --cov=main --cov-report=term-missing
