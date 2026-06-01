@@ -31,22 +31,26 @@ jobs:
       - name: Test chart notification
         if: inputs.test_chart == true
         run: |
-          # チャート PNG 生成
-          python3 -c "
-          import matplotlib; matplotlib.use('Agg')
+          python - <<'EOF'
+          import matplotlib
+          matplotlib.use('Agg')
           import matplotlib.pyplot as plt
+          import os, sys
+          sys.path.insert(0, '.')
+          from main import _notify_discord
+
           fig, ax = plt.subplots(figsize=(10, 5))
           ax.plot([1,2,3,4,5], [100,102,101,103,105], color='#2c3e50', linewidth=2)
-          ax.set_title('FX-Compass Chart Test')
+          ax.set_title('FX-Compass Chart Test (Python)')
           ax.grid(alpha=0.3)
-          plt.savefig('/tmp/test_chart.png', dpi=120, bbox_inches='tight')
-          "
-          # curl で multipart 送信（URL の有効性と画像添付の両方を確認）
-          curl -s -o /tmp/curl_out.txt -w "HTTP status: %{http_code}\n" \
-            -F 'payload_json={"content":"**[FX-Compass]** チャート添付テスト"}' \
-            -F "files[0]=@/tmp/test_chart.png;type=image/png" \
-            "$DISCORD_WEBHOOK_URL"
-          echo "Response body:"; cat /tmp/curl_out.txt
+          path = '/tmp/test_chart.png'
+          plt.savefig(path, dpi=120, bbox_inches='tight')
+          plt.close()
+
+          url = os.environ.get('DISCORD_WEBHOOK_URL')
+          _notify_discord('**[FX-Compass]** チャート添付テスト — Python urllib', url, [path])
+          print('送信完了')
+          EOF
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       - name: Test notification

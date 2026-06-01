@@ -78,7 +78,6 @@ def _notify_discord(message: str, webhook_url: str, chart_paths: list | None = N
             body = b""
             body += f"--{boundary}".encode() + crlf
             body += b'Content-Disposition: form-data; name="payload_json"' + crlf
-            body += b'Content-Type: application/json' + crlf
             body += crlf
             body += json.dumps({"content": message}).encode() + crlf
             for i, path in enumerate(chart_paths):
