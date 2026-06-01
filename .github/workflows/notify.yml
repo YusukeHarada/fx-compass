@@ -9,6 +9,11 @@ on:
         description: "テスト通知を送信する（動作確認用）"
         type: boolean
         default: false
+      min_level:
+        description: "通知最低レベル（1=WATCH〜4=CONFIRMED、デフォルト2）"
+        type: choice
+        options: ["1", "2", "3", "4"]
+        default: "2"
 
 jobs:
   scan:
@@ -29,6 +34,6 @@ jobs:
             "$DISCORD_WEBHOOK_URL"
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      - run: python main.py --min-level 2
+      - run: python main.py --min-level ${{ inputs.min_level || '2' }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
